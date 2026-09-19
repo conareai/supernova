@@ -417,6 +417,8 @@ impl VectorStore for ConareDbStore {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
