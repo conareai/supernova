@@ -146,8 +146,14 @@ impl ConareDbStore {
         req
     }
 
+    // An empty `namespace` addresses the engine's root store (`conaredb serve
+    // --path <store>` with no namespaces): the same operations at `/v1/<op>`.
     fn ns_path(&self, op: &str) -> String {
-        format!("/v1/namespaces/{}/{}", self.namespace, op)
+        if self.namespace.is_empty() {
+            format!("/v1/{op}")
+        } else {
+            format!("/v1/namespaces/{}/{}", self.namespace, op)
+        }
     }
 
     fn id_string(id: &PointId) -> String {
@@ -398,6 +404,13 @@ impl VectorStore for ConareDbStore {
     }
 
     async fn delete_collection(&self) -> Result<(), StoreError> {
+        if self.namespace.is_empty() {
+            return Err(other(
+                "conaredb: the root store (empty namespace) cannot be deleted through the API; \
+                 point `namespace` at a namespace or start the engine on an empty --path"
+                    .to_string(),
+            ));
+        }
         let resp = self
             .request(
                 reqwest::Method::DELETE,

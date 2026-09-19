@@ -148,7 +148,7 @@ vectorstore:
 #   type: conaredb
 #   url: http://10.0.0.4:8080
 #   api_key: ${CONAREDB_AUTH_TOKEN}
-#   namespace: fineweb_1b
+#   namespace: fineweb_1b            # "" = the engine's root store (/v1/<op>)
 #   label: doc                        # node label (default doc)
 #   expect_rows: 1014549394           # declared row count: sizes the index build
 #   timeout_s: 14400                  # the trailing compaction is one synchronous call
