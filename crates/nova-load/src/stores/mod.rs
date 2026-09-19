@@ -5,6 +5,8 @@ mod elastic;
 mod opensearch;
 #[cfg(feature = "milvus")]
 mod milvus_store;
+#[cfg(feature = "conaredb")]
+mod conaredb;
 
 use std::collections::HashMap;
 
@@ -99,6 +101,8 @@ pub enum VectorStoreConfig {
     OpenSearch(Box<opensearch::OpenSearchConfig>),
     #[cfg(feature = "milvus")]
     Milvus(milvus_store::MilvusConfig),
+    #[cfg(feature = "conaredb")]
+    Conaredb(conaredb::ConareDbConfig),
 }
 
 impl VectorStoreConfig {
@@ -115,6 +119,8 @@ impl VectorStoreConfig {
             VectorStoreConfig::OpenSearch(c) => Ok(Box::new(c.connect().await?)),
             #[cfg(feature = "milvus")]
             VectorStoreConfig::Milvus(c) => Ok(Box::new(c.connect().await?)),
+            #[cfg(feature = "conaredb")]
+            VectorStoreConfig::Conaredb(c) => Ok(Box::new(c.connect().await?)),
         }
     }
 }
