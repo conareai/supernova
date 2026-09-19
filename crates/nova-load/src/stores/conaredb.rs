@@ -13,7 +13,6 @@
 //! so a schema with several named vectors, or sparse / multivector values, is
 //! rejected at `ensure_collection` / `upsert_batch`.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

@@ -1003,7 +1003,7 @@ mod tests {
         // or not those features are on. (These tests are Qdrant-only.)
         match &cfg.vectorstore {
             VectorStoreConfig::Qdrant(store) => store.as_ref(),
-            #[cfg(any(feature = "elastic", feature = "opensearch", feature = "milvus"))]
+            #[cfg(any(feature = "elastic", feature = "opensearch", feature = "milvus", feature = "conaredb"))]
             _ => panic!("test fixture must be a qdrant vectorstore"),
         }
     }
