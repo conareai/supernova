@@ -138,6 +138,21 @@ vectorstore:
 #   # username: root
 #   # password: ${MILVUS_PASSWORD}
 #   recreate: false
+#
+# ConareDB (feature `conaredb`) — one dense vector + payload per node, loaded
+# through the engine's binary bulk frames (`/v1/namespaces/<ns>/bulk-vectors`)
+# with the index built once at the trailing compaction `enable_indexing`
+# requests. Payload fields become node properties; a `text` field feeds the
+# keyword index. Sparse / multivector are not supported.
+# vectorstore:
+#   type: conaredb
+#   url: http://10.0.0.4:8080
+#   api_key: ${CONAREDB_AUTH_TOKEN}
+#   namespace: fineweb_1b
+#   label: doc                        # node label (default doc)
+#   expect_rows: 1014549394           # declared row count: sizes the index build
+#   timeout_s: 14400                  # the trailing compaction is one synchronous call
+#   recreate: false
 
 loader:
   batch_size: 256

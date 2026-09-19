@@ -47,6 +47,16 @@ target:
   # tls_insecure: true                # a default node serves a self-signed cert
   #   Reports per-result scores and reads its own `space_type`, so tie-aware
   #   recall works here as it does on qdrant (see docs/storm/recall.md).
+  #
+  # type: conaredb
+  # url: http://10.0.0.4:8080         # an engine, or the shard router in front of several
+  # api_key: ${CONAREDB_AUTH_TOKEN}
+  # namespace: fineweb_1b
+  # timeout_s: 300
+  #   A batch of N queries is N concurrent `/search` requests (the engine has
+  #   no multi-query endpoint); the batch latency is the fan-out's wall.
+  #   Reports per-hit cosine scores, so tie-aware recall works. `search_params`
+  #   shape: { nprobe: 400, oversample: 32, rescore: 2400 }.
 
 # What to search with.
 query:
