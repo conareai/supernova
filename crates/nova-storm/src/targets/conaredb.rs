@@ -167,10 +167,13 @@ impl ConareDbTarget {
     }
 
     async fn one(&self, dense: &[f32]) -> Result<Value, (String, bool)> {
-        let mut req = self.client.post(format!(
-            "{}/v1/namespaces/{}/search",
-            self.base, self.namespace
-        ));
+        // An empty `namespace` is the engine's root store: `/v1/search`.
+        let url = if self.namespace.is_empty() {
+            format!("{}/v1/search", self.base)
+        } else {
+            format!("{}/v1/namespaces/{}/search", self.base, self.namespace)
+        };
+        let mut req = self.client.post(url);
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
