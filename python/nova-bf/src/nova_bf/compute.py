@@ -191,6 +191,15 @@ def _to_query_array(values: list) -> np.ndarray:
     return np.array(values)
 
 
+def _query_meta_pydict(table, cols: list[str], vector_col: str) -> dict[str, list]:
+    """Convert query metadata to Python without materializing the vector column.
+
+    Vectors are decoded separately from Arrow buffers; converting them through
+    `to_pydict()` would unnecessarily box every scalar as a Python object.
+    """
+    return table.select([c for c in cols if c != vector_col]).to_pydict()
+
+
 def load_queries(
     store: Store, qcfg, filter_cols: list[str] = (), rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[str], dict[str, list], dict[str, np.ndarray]]:
@@ -210,7 +219,7 @@ def load_queries(
     q_date_fmts = normalize_date_fields(qcfg.date_fields)
     for f in store.list_parquets():
         table = store.read_columns(f.read_path, cols)
-        d = table.to_pydict()
+        d = _query_meta_pydict(table, cols, qcfg.dense_column)
 
         # Convert declared date fields only for query/filter evaluation; payload
         # values in `d` retain their original representation.
@@ -545,7 +554,11 @@ def load_queries_sparse(
     q_date_fmts = normalize_date_fields(qcfg.date_fields)
     for f in store.list_parquets():
         table = store.read_columns(f.read_path, cols)
-        d = table.to_pydict()  # ORIGINAL values — payload/id keep their source form
+        # ORIGINAL values — payload/id keep their source form. The VECTOR column
+        # is excluded: only id/payload/filter values are ever read out of `d`,
+        # and boxing a vector column into Python objects costs time and memory
+        # proportional to its every scalar (see `load_queries_multivector`).
+        d = _query_meta_pydict(table, cols, qcfg.sparse_column)
         # Date columns -> epoch µs for filter arrays only (payload keeps strings).
         conv = convert_table_date_columns(table, q_date_fmts)
         row_offsets, idx, val = sparse_to_coo_parts(conv[qcfg.sparse_column])
@@ -625,7 +638,9 @@ def load_queries_multivector(
     q_date_fmts = normalize_date_fields(qcfg.date_fields)
     for f in store.list_parquets():
         table = store.read_columns(f.read_path, cols)
-        d = table.to_pydict()  # ORIGINAL values — payload/id keep their source form
+        # ORIGINAL values — payload/id keep their source form. Excluding the
+        # vector column is what keeps this cheap.
+        d = _query_meta_pydict(table, cols, qcfg.multivector_column)
         conv = convert_table_date_columns(table, q_date_fmts)
         # Decode the multivector column from the ORIGINAL table (date conversion
         # only ever touches declared date columns, never a vector column — but
@@ -3147,6 +3162,134 @@ def _run_dense_prefetch(batch, ranges, device, process_slice) -> None:
             done.synchronize()
 
 
+def _mv_full_threshold(Q, thr_packed, qsel):
+    """Expand this member's thresholds to all query rows.
+
+    Unowned rows receive `-inf` so they cannot be pruned. Returns `None` if no
+    query has a finite threshold.
+    """
+    import torch
+
+    from nova_bf.tiebreak import unpack_score
+
+    thr = unpack_score(thr_packed)
+    if qsel is None:
+        n_sel = Q.n_q
+    elif isinstance(qsel, slice):
+        # `indices()` resolves None/negative bounds and any step, so this is
+        # right even for a selection that is not the contiguous step-1 block
+        # `_plain_block` elsewhere assumes — `stop - start` would not be.
+        n_sel = len(range(*qsel.indices(Q.n_q)))
+    else:
+        # Not reachable today (`qsel` is None or a slice), but cheap to keep
+        # correct if that ever widens to a mask or an index tensor.
+        n_sel = int(qsel.sum()) if qsel.dtype == torch.bool else int(qsel.numel())
+
+    if thr.shape[0] != n_sel:
+        owned = "query rows" if qsel is None else "selected query rows"
+        raise ValueError(
+            f"multivector prune: threshold length {thr.shape[0]} != {n_sel} "
+            f"{owned}, which would broadcast and prune against the wrong "
+            "query's top-K")
+
+    if qsel is None:
+        full_thr = thr
+    else:
+        full_thr = torch.full((Q.n_q,), float("-inf"), dtype=thr.dtype,
+                              device=thr.device)
+        full_thr[qsel] = thr
+    if not bool(torch.isfinite(full_thr).any()):
+        return None
+    return full_thr
+
+
+def _mv_note_unpruned_rate(mv_state, scores, Q, thr_packed, qsel) -> bool:
+    """Teach the prune's gate from a slice that was scored WITHOUT it.
+
+    `scores >= threshold` is the live fraction the prune would have been left
+    with, so a slice the gate skipped still tells it whether skipping was
+    right. Without this the gate could only learn by engaging, which means
+    paying for a whole pass one (~195 ms on a production slice) just to look —
+    and the rate it is trying to observe climbs over the run, so it would have
+    to keep looking.
+
+    Returns whether it actually measured, so the caller can spend its
+    once-per-batch probe on a slice that taught it something.
+    """
+    import torch
+
+    if not mv_state.wants_probe():
+        return False
+    thr = _mv_full_threshold(Q, thr_packed, qsel)
+    if thr is None:
+        return False                # nothing has a threshold; nothing to learn
+    # The one device->host sync this costs, which is why the caller spends it
+    # once per batch rather than per slice.
+    live = scores >= thr[:, None]
+    n_pairs = live.numel()
+    mv_state.note_pruned(
+        n_pairs - int(live.sum(dtype=torch.int64).item()), n_pairs)
+    return True
+
+
+def _mv_pruned_scores(sl, Q, metric, mv_state, thr_packed, qsel):
+    """Multivector scores for ONE member with provably-dead pairs at -inf.
+
+    Returns None when the prune cannot apply, in which case the caller scores
+    normally. Declining is always safe: it costs throughput, never correctness.
+
+    The result is NOT shared through `score_cache`. Pruned scores depend on
+    THIS member's running threshold, so two searches over the same metric would
+    otherwise read each other's prune decisions — and the one with the looser
+    threshold would inherit the tighter one's, dropping live candidates.
+    """
+    import torch
+
+    if mv_state is None or not isinstance(sl, MultiVectorBatchSlice):
+        return None
+    _MV_PRUNE["calls"] += 1
+    # `cosine` scores per-token-normalized vectors, so that — not the raw
+    # token — is the representation pass one must round.
+    c_flat = torch.nn.functional.normalize(sl.flat, dim=1) if metric == "cosine" else sl.flat
+    q_flat = Q.flat_normalized if metric == "cosine" else Q.flat
+
+    thr_all = _mv_full_threshold(Q, thr_packed, qsel)
+    if thr_all is None:
+        _MV_PRUNE["declined"] += 1
+        return None
+
+    # Sync THIS SLICE's device
+    timing = bool(os.environ.get("NOVA_BF_PRUNE_TIMING"))
+    dev = c_flat.device
+    if timing and dev.type == "cuda":
+        torch.cuda.synchronize(dev)
+    t0 = time.perf_counter() if timing else 0.0
+    res = mv_state.score(q_flat, c_flat, Q.offsets, sl.doc_offsets, thr_all)
+    # Stop the clock BEFORE the decline check.
+    if timing:
+        if dev.type == "cuda":
+            torch.cuda.synchronize(dev)
+        _MV_PRUNE["sec"] += time.perf_counter() - t0
+    if res is None:
+        _MV_PRUNE["declined"] += 1
+        return None
+    scores, dead = res
+
+    n_pairs = int(dead.numel())
+    n_pruned = int(dead.sum())
+    _MV_PRUNE["pairs"] += n_pairs
+    _MV_PRUNE["pruned"] += n_pruned
+    # Feed the engage/disengage gate from the counts just materialized, so
+    # maintaining it costs no sync of its own.
+    mv_state.note_pruned(n_pruned, n_pairs)
+    return scores
+
+
+# Process-wide tally of what the prune did. NOTHING READS THIS in production —
+# it exists for tests and for benchmark harnesses, which reset it themselves
+_MV_PRUNE = {"pairs": 0, "pruned": 0, "calls": 0, "declined": 0, "sec": 0.0}
+
+
 def _process_batch_group(
     batch, member_idxs: list[int], specs: list[SearchSpec], spec_Q, spec_q_norms,
     spec_top_key, spec_top_enc, spec_thr,
@@ -3158,6 +3301,7 @@ def _process_batch_group(
     multivector_token_budget: int | None = None,
     multivector_double_buffer: bool = False,
     two_pass: bool = True,
+    mv_prune=None,
 ) -> float:
     """Process one vector-type batch, sharing work across search members.
 
@@ -3219,6 +3363,9 @@ def _process_batch_group(
     
     # Probe one ordinary slice to seed two-pass profitability.
     tp_probe = [bool(tp_groups)]
+
+    # Mutable gate for the once-per-batch live-fraction probe; probing requires a sync.
+    mv_probe = [mv_prune is not None]
 
     def _flush_pending(m: int) -> None:
         if not pending[m]:
@@ -3306,6 +3453,13 @@ def _process_batch_group(
             )
             scores = None
             if plan is None:
+                # Pruned scores are member-specific (they depend on this
+                # member's running threshold), so they bypass `score_cache`.
+                scores = _mv_pruned_scores(
+                    sl, spec_Q[m], s.metric, mv_prune if prune else None,
+                    spec_thr[m], spec_qsel[m],
+                )
+            if plan is None and scores is None:
                 scores = score_cache.get(score_key)
                 if scores is None:
                     scores = sl.score(
@@ -3315,6 +3469,17 @@ def _process_batch_group(
                     )
                     if score_share_count[score_key] > 1:
                         score_cache[score_key] = scores
+                # The prune declined or is gated off, so this slice was scored
+                # the ordinary way — and its scores say exactly how much the
+                # prune WOULD have removed. Learning from them is what lets a
+                # disengaged gate re-engage without paying for a speculative
+                # pass one, the same trade the dense two-pass makes when it
+                # seeds `_TP_LIVE_HINT` from one-pass scoring.
+                if (mv_probe[0] and mv_prune is not None and prune
+                        and scores is not None):
+                    if _mv_note_unpruned_rate(mv_prune, scores, spec_Q[m],
+                                              spec_thr[m], spec_qsel[m]):
+                        mv_probe[0] = False
 
             sel_rows, sel_cols, cell_mask = select(m, rows, true_rows, cache)
             if sel_rows is None:
@@ -3945,6 +4110,7 @@ def _process_shared_batch(
     multivector_token_budget: int | None = None,
     multivector_double_buffer: bool = False,
     two_pass: bool = True,
+    mv_prune=None,
 ) -> float:
     """Process one shared corpus batch for all searches of a vector type.
 
@@ -4033,7 +4199,7 @@ def _process_shared_batch(
         ordinal_base=ordinal_base, ordinal_row_ids=ordinal_row_ids,
         multivector_token_budget=multivector_token_budget,
         multivector_double_buffer=multivector_double_buffer,
-        two_pass=two_pass,
+        two_pass=two_pass, mv_prune=mv_prune,
         spec_qsel=spec_qsel, spec_qrows=spec_qrows,
         spec_cos_scale=spec_cos_scale,
     )
@@ -5309,6 +5475,15 @@ def run_compute(
         # bounded by the end-to-end `window` semaphore, not by `fq` alone.
         pending: dict[int, tuple] = {}
 
+        # Opt-in multivector prune. Certification and the float16 query copy
+        # are done lazily from the first corpus slice, so this only allocates
+        # state; `None` leaves every scoring path byte-for-byte as it was.
+        mv_prune = None
+        if "multivector" in vts_needed and cfg.params.multivector_prune == "fp16":
+            from nova_bf.mv_fp16 import Fp16State
+            mv_prune = Fp16State(
+                min_prune_rate=cfg.params.multivector_min_prune_rate)
+
         # Per-vector-type buffers for coalescing compacted file batches into larger
         # `_process_shared_batch` calls. Flush when accumulated rows reach the target,
         # with a final flush for any remainder.
@@ -5365,6 +5540,7 @@ def run_compute(
                     cfg.params.multivector_double_buffer if vt == "multivector" else False
                 ),
                 two_pass=cfg.params.two_pass == "auto",
+                mv_prune=mv_prune if vt == "multivector" else None,
             )
             coalesce_buf[vt] = []
             coalesce_rows[vt] = 0
@@ -5472,6 +5648,8 @@ def run_compute(
                                 else False
                             ),
                             two_pass=cfg.params.two_pass == "auto",
+                            mv_prune=(
+                                mv_prune if vt == "multivector" else None),
                         )
 
                 # Per-file live fractions from cumulative device counters.

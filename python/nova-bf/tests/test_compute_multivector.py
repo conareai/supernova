@@ -772,3 +772,51 @@ def test_decoder_all_null_and_empty_column():
     off2, flat2 = multivector_to_ragged(pa.chunked_array([empty]))
     assert off2.tolist() == [0]
     assert flat2.shape[0] == 0
+
+
+def _mv_chunk(docs, D=4):
+    """`list<list<float32>>` array from a list of per-doc token-vector lists."""
+    toks = [t for doc in docs for t in doc]
+    inner = pa.ListArray.from_arrays(
+        pa.array(list(range(0, len(toks) * D + 1, D)), type=pa.int32()),
+        pa.array([x for t in toks for x in t], type=pa.float32()),
+    )
+    outer, n = [0], 0
+    for doc in docs:
+        n += len(doc)
+        outer.append(n)
+    return pa.ListArray.from_arrays(pa.array(outer, type=pa.int32()), inner)
+
+
+def test_decoder_stitches_multiple_chunks():
+    """A multi-row-group column decodes per chunk and concatenates.
+
+    Arrow list offsets are int32, so a column past 2**31 token floats cannot be
+    combined into one array at all — the real 10k-query bge-m3 set is 3.875e9
+    and `combine_chunks()` raised ArrowInvalid on it. The stitched path must
+    agree exactly with decoding the same docs as one chunk.
+    """
+    a = [[[1.0, 2, 3, 4], [5, 6, 7, 8]], [[9, 10, 11, 12]]]   # 2 docs, 3 tokens
+    b = [[], [[13.0, 14, 15, 16], [17, 18, 19, 20]]]           # 2 docs, 2 tokens
+
+    off, flat = multivector_to_ragged(
+        pa.chunked_array([_mv_chunk(a), _mv_chunk(b)]))
+    one_off, one_flat = multivector_to_ragged(
+        pa.chunked_array([_mv_chunk(a + b)]))
+
+    assert off.tolist() == [0, 2, 3, 3, 5] == one_off.tolist()
+    assert flat.shape == (5, 4)
+    np.testing.assert_array_equal(flat, one_flat)
+
+
+def test_decoder_stitches_chunks_that_are_entirely_empty():
+    """A chunk of only zero-token docs decodes to (0, 0) and must not set the
+    stitched width to 0 — it carries doc slots, just no tokens."""
+    off, flat = multivector_to_ragged(pa.chunked_array([
+        _mv_chunk([[], []]),
+        _mv_chunk([[[1.0, 2, 3, 4]]]),
+        _mv_chunk([[]]),
+    ]))
+    assert off.tolist() == [0, 0, 0, 1, 1]
+    assert flat.shape == (1, 4)
+    np.testing.assert_array_equal(flat, np.array([[1.0, 2, 3, 4]], np.float32))

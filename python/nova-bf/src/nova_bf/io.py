@@ -204,6 +204,41 @@ def dense_to_2d(col: pa.ChunkedArray) -> np.ndarray:
     return np.ascontiguousarray(flat.reshape(n, dim))
 
 
+def _stitch_ragged_chunks(chunks: list) -> tuple[np.ndarray, np.ndarray]:
+    """Decode each chunk on its own and concatenate — see `multivector_to_ragged`.
+
+    Every chunk goes through the single-array path, so all of that path's
+    validity/slice/shape handling applies per chunk. Only two things are joined
+    here: the per-document token counts, re-prefix-summed into int64 offsets,
+    and the float32 token matrix.
+
+    A width disagreement between chunks is left to `np.concatenate` to reject.
+    The decoder upstream guarantees a consistent token dimension, and this
+    function does not know which FILE it is decoding — so it could only say
+    "chunk 3 disagrees with chunk 0", which is no more useful than numpy
+    naming the two shapes.
+    """
+    counts_parts: list[np.ndarray] = []
+    mats: list[np.ndarray] = []
+    dim = 0
+    for chunk in chunks:
+        off, flat = multivector_to_ragged(chunk)
+        counts_parts.append(np.diff(off))
+        if flat.shape[1] > 0:
+            dim = flat.shape[1]
+        mats.append(flat)
+    counts = (np.concatenate(counts_parts) if counts_parts
+              else np.zeros(0, dtype=np.int64))
+    doc_offsets = np.concatenate(([0], np.cumsum(counts, dtype=np.int64)))
+    # A chunk of only null/empty docs decodes to a (0, 0) matrix whose zero
+    # width would poison the concat, so drop the empties. `dim` is then used
+    # only if EVERY chunk was empty, to keep the returned width meaningful.
+    nonempty = [m for m in mats if m.shape[0] > 0]
+    flat_tokens = (np.concatenate(nonempty, axis=0) if nonempty
+                   else np.zeros((0, dim), dtype=np.float32))
+    return doc_offsets, flat_tokens
+
+
 def multivector_to_ragged(col: pa.ChunkedArray) -> tuple[np.ndarray, np.ndarray]:
     """A `list<list<float32>>` column (one doc = outer entry, one D-dim token
     vector = inner entry) → `(doc_offsets, flat_tokens)`.
@@ -236,8 +271,13 @@ def multivector_to_ragged(col: pa.ChunkedArray) -> tuple[np.ndarray, np.ndarray]
 
     The token width D is taken from the first token; per-token width variance
     is left to `reshape` to catch (an O(total_tokens) uniformity scan would tax
-    the corpus path, and nova-embed emits a uniform width by construction)."""
-    col = col.combine_chunks()  # ChunkedArray -> a single ListArray
+    the corpus path, and nova-embed emits a uniform width by construction).
+
+    Chunks are decoded INDIVIDUALLY and stitched in numpy."""
+    chunks = list(col.chunks) if isinstance(col, pa.ChunkedArray) else [col]
+    if len(chunks) > 1:
+        return _stitch_ragged_chunks(chunks)
+    col = chunks[0] if chunks else col.combine_chunks()
     n = len(col)
     if n == 0:
         return np.zeros(1, dtype=np.int64), np.zeros((0, 0), dtype=np.float32)

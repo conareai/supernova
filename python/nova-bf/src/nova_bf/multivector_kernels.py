@@ -123,6 +123,17 @@ def offsets_fit_int32(
     return tile <= _INT32_MAX and out_max <= _INT32_MAX
 
 
+def token_rows_fit_int32(n_rows: int, dim: int) -> bool:
+    """Whether int32 row-stride address arithmetic is safe.
+
+    Triton does not promote `tl.arange` row indices when multiplying by the
+    stride; overflow can silently address the wrong token.
+    """
+    if n_rows <= 0 or dim <= 0:
+        return True
+    return n_rows * dim <= _INT32_MAX
+
+
 def fused_ragged_maxsim_reduce(
     similarity,
     query_offsets,
@@ -154,8 +165,10 @@ def fused_ragged_maxsim_reduce(
         tensor.is_cuda for tensor in (similarity, query_offsets, document_offsets)
     ):
         raise ValueError("fused ragged reduction requires CUDA tensors")
-    if similarity.dtype != torch.float32 or similarity.ndim != 2:
-        raise TypeError("fused ragged reduction requires a 2D float32 similarity tensor")
+    # float16 is accepted as well as float32 — the output is float32 either way.
+    if similarity.dtype not in (torch.float32, torch.float16) or similarity.ndim != 2:
+        raise TypeError(
+            "fused ragged reduction requires a 2D float32 or float16 similarity tensor")
     if query_offsets.dtype != torch.int64 or document_offsets.dtype != torch.int64:
         raise TypeError("fused ragged reduction requires int64 offset tensors")
     if (
@@ -181,6 +194,13 @@ def fused_ragged_maxsim_reduce(
             raise TypeError("fused ragged reduction out must be a CUDA float32 tensor")
         if n_documents > 0 and out.stride(1) != 1:
             raise ValueError("fused ragged reduction out must have a contiguous last dim")
+        # A contiguous last dim does not by itself stop ROWS overlapping: a
+        # stride-0 or short-strided view would alias several queries onto the
+        # same output row and lose all but the last write.
+        if n_queries > 1 and out.stride(0) < n_documents:
+            raise ValueError(
+                f"fused ragged reduction out row stride {out.stride(0)} < "
+                f"{n_documents} columns, so its rows overlap")
     if n_queries == 0 or n_documents == 0:
         return out
 
@@ -212,5 +232,369 @@ def fused_ragged_maxsim_reduce(
         BLOCK_DOCUMENT=block_document,
         num_warps=num_warps,
         num_stages=2,
+    )
+    return out
+
+# ---------------------------------------------------------------------------
+# Fused float16 pass one for multivector pruning.
+#
+# This kernel avoids materializing the full query-token × corpus-token
+# similarity matrix. It performs the float16 GEMM directly, accumulates in
+# float32, and takes the per-document token max in the epilogue.
+#
+# Each program owns one (query-token tile, document) pair and loops over that
+# document's tokens, requiring no atomics or cross-tile reduction. Documents
+# vary fastest in the grid to improve query-tile reuse.
+#
+# The output is one maximum per (query token, document); MaxSim's outer
+# per-query sum is performed separately.
+
+try:
+    @triton.jit
+    def _gemm_ragged_maxsim(
+        Q, C, DOFF, OUT,
+        M, K, n_documents,
+        stride_qm, stride_cn, stride_om,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        EVEN_K: tl.constexpr,
+    ):
+        """FP16 GEMM with FP32 accumulation and a per-document max epilogue.
+
+        Writes the maximum token dot product for each (query token, document), or
+        `-inf` for empty documents. Padded query rows are masked on store, and padded
+        document lanes are clamped for safe loads then excluded from the max.
+        """
+        pid = tl.program_id(0)
+        # Document varies fastest so consecutive programs share a query tile.
+        pid_m = pid // n_documents
+        doc = pid % n_documents
+
+        d0 = tl.load(DOFF + doc).to(tl.int32)
+        d1 = tl.load(DOFF + doc + 1).to(tl.int32)
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        rm = offs_m % M                      # wrapped rows keep loads in bounds
+        offs_k = tl.arange(0, BLOCK_K)
+        lane_n = tl.arange(0, BLOCK_N)
+
+        best = tl.full((BLOCK_M,), float("-inf"), tl.float32)
+        n0 = d0
+        while n0 < d1:
+            offs_n = n0 + lane_n
+            nm = offs_n < d1
+            rn = tl.where(nm, offs_n, d0)    # clamp, then mask in the epilogue
+
+            a_ptrs = Q + rm[:, None] * stride_qm + offs_k[None, :]
+            b_ptrs = C + rn[None, :] * stride_cn + offs_k[:, None]
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K):
+                if EVEN_K:
+                    a = tl.load(a_ptrs)
+                    b = tl.load(b_ptrs)
+                else:
+                    km = (k0 + offs_k) < K
+                    a = tl.load(a_ptrs, mask=km[None, :], other=0.0)
+                    b = tl.load(b_ptrs, mask=km[:, None], other=0.0)
+                acc = tl.dot(a, b, acc)
+                a_ptrs += BLOCK_K
+                b_ptrs += BLOCK_K
+
+            v = tl.where(nm[None, :], acc, float("-inf"))
+            best = tl.maximum(best, tl.max(v, 1))
+            n0 += BLOCK_N
+
+        tl.store(OUT + offs_m * stride_om + doc, best, mask=offs_m < M)
+
+except Exception:                            # no Triton, or a moved API
+    _gemm_ragged_maxsim = None
+
+
+def fused_fp16_token_maxima(
+    q_half, c_half, document_offsets, *, out=None,
+    block_m: int = 128, block_n: int = 64, block_k: int = 64, num_warps: int = 4,
+    num_stages: int = 3,
+):
+    """Compute FP32 per-token document maxima with the fused FP16 pass.
+
+    Returns `(n_query_tokens, n_documents)` maxima, or `None` when the kernel
+    cannot safely run. Token inputs are FP16; accumulation is FP32.
+    """
+    import torch
+
+    if _gemm_ragged_maxsim is None:
+        return None
+    if not all(t.is_cuda for t in (q_half, c_half, document_offsets)):
+        return None
+    if not (q_half.device == c_half.device == document_offsets.device):
+        raise ValueError(
+            "fused fp16 pass one inputs must be on one CUDA device")
+    if q_half.dtype != torch.float16 or c_half.dtype != torch.float16:
+        raise TypeError("fused fp16 pass one requires float16 token matrices")
+    if q_half.ndim != 2 or c_half.ndim != 2:
+        raise ValueError("fused fp16 pass one requires 2D token matrices")
+    if q_half.shape[1] != c_half.shape[1]:
+        raise ValueError(
+            f"token dimension mismatch: queries {q_half.shape[1]} vs corpus "
+            f"{c_half.shape[1]}")
+    if document_offsets.dtype != torch.int64:
+        raise TypeError("fused fp16 pass one requires int64 document offsets")
+    q_half = q_half.contiguous()
+    c_half = c_half.contiguous()
+
+    M, K = int(q_half.shape[0]), int(q_half.shape[1])
+    n_documents = int(document_offsets.numel()) - 1
+    if M == 0 or K == 0 or n_documents <= 0:
+        return None
+
+    if out is None:
+        out = torch.empty((M, n_documents), dtype=torch.float32,
+                          device=q_half.device)
+    elif out.shape != (M, n_documents) or out.dtype != torch.float32:
+        raise ValueError("fused fp16 pass one out must be float32 "
+                         f"({M}, {n_documents})")
+    elif not out.is_cuda or out.device != q_half.device:
+        raise ValueError(
+            "fused fp16 pass one out must be on the input CUDA device")
+    elif n_documents > 0 and out.stride(1) != 1:
+        raise ValueError("fused fp16 pass one out must have a contiguous "
+                         "last dimension")
+    # As above: a contiguous last dim still permits overlapping ROWS, which
+    # would alias several query tokens onto one output row.
+    elif M > 1 and out.stride(0) < n_documents:
+        raise ValueError(
+            f"fused fp16 pass one out row stride {out.stride(0)} < "
+            f"{n_documents} columns, so its rows overlap")
+
+    # Triton forms these row-stride products in int32. Guard the padded
+    # output tile too, since masked lanes still form addresses.
+    padded_m = triton.cdiv(M, block_m) * block_m
+    if (not token_rows_fit_int32(M, int(q_half.stride(0)))
+            or not token_rows_fit_int32(int(c_half.shape[0]),
+                                        int(c_half.stride(0)))
+            or not token_rows_fit_int32(padded_m, int(out.stride(0)))):
+        return None
+
+    grid = (triton.cdiv(M, block_m) * n_documents,)
+    _gemm_ragged_maxsim[grid](
+        q_half, c_half, document_offsets, out,
+        M, K, n_documents,
+        q_half.stride(0), c_half.stride(0), out.stride(0),
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        EVEN_K=(K % block_k == 0),
+        num_warps=num_warps, num_stages=num_stages,
+    )
+    return out
+# ---------------------------------------------------------------------------
+# Fused float32 survivor pass for multivector pruning.
+#
+# After pruning, live (query, document) pairs are sparse and irregular. A
+# per-document PyTorch path would repeatedly gather the same query tokens and
+# launch many small GEMMs.
+#
+# This kernel consumes query-row indices directly, reads live rows from
+# `q_flat`, and scores all documents in one launch. Each program owns one
+# (document, tile of live query tokens) pair.
+#
+# `input_precision="ieee"` is required so float32 dot products do not use TF32
+# and remain consistent with the exact path.
+
+
+try:
+    @triton.jit
+    def _gemm_indexed_maxsim(
+        Q, C, ROWIDX, PROG_DOC, PROG_BASE, PROG_END, DOFF, OUT,
+        K, stride_qm, stride_cn,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        EVEN_K: tl.constexpr,
+    ):
+        """Compute FP32 token maxima for indexed query rows.
+
+        Each program scores a tile of query-token rows against one document and writes
+        their maximum token dot products. Padded rows and document lanes are masked;
+        empty documents produce `-inf`.
+        """
+        p = tl.program_id(0)
+        doc = tl.load(PROG_DOC + p)
+        base = tl.load(PROG_BASE + p)
+        end = tl.load(PROG_END + p)
+
+        pos = base + tl.arange(0, BLOCK_M)
+        pm = pos < end
+        rows = tl.load(ROWIDX + pos, mask=pm, other=0)
+
+        d0 = tl.load(DOFF + doc).to(tl.int32)
+        d1 = tl.load(DOFF + doc + 1).to(tl.int32)
+
+        offs_k = tl.arange(0, BLOCK_K)
+        lane_n = tl.arange(0, BLOCK_N)
+        best = tl.full((BLOCK_M,), float("-inf"), tl.float32)
+
+        n0 = d0
+        while n0 < d1:
+            offs_n = n0 + lane_n
+            nm = offs_n < d1
+            rn = tl.where(nm, offs_n, d0)
+
+            a_ptrs = Q + rows[:, None] * stride_qm + offs_k[None, :]
+            b_ptrs = C + rn[None, :] * stride_cn + offs_k[:, None]
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K):
+                if EVEN_K:
+                    a = tl.load(a_ptrs, mask=pm[:, None], other=0.0)
+                    b = tl.load(b_ptrs)
+                else:
+                    km = (k0 + offs_k) < K
+                    a = tl.load(a_ptrs, mask=pm[:, None] & km[None, :], other=0.0)
+                    b = tl.load(b_ptrs, mask=km[:, None], other=0.0)
+                # IEEE float32, never TF32: these scores must match the exact
+                # path, and TF32's 10-bit mantissa would not.
+                acc = tl.dot(a, b, acc, input_precision="ieee")
+                a_ptrs += BLOCK_K
+                b_ptrs += BLOCK_K
+
+            v = tl.where(nm[None, :], acc, float("-inf"))
+            best = tl.maximum(best, tl.max(v, 1))
+            n0 += BLOCK_N
+
+        tl.store(OUT + pos, best, mask=pm)
+
+except Exception:                            # no Triton, or a moved API
+    _gemm_indexed_maxsim = None
+
+
+def fused_indexed_token_maxima(
+    q_flat, c_flat, row_index, tokens_per_document, document_offsets, *,
+    block_m: int = 64, block_n: int = 64, block_k: int = 32, num_warps: int = 4,
+    num_stages: int = 2,
+):
+    """Compute float32 token maxima for indexed query rows.
+
+    `row_index` is grouped by document, with per-document counts in
+    `tokens_per_document`. Returns one maximum per indexed token, or `None`
+    when the kernel cannot safely run.
+
+    `document_offsets` is TRUSTED to be non-decreasing and within
+    `[0, c_flat.shape[0]]` — `mv_fp16._pruned_maxsim_scores` checks that on its
+    host copy, where it is free; here it would cost a sync.
+    """
+    import torch
+
+    if _gemm_indexed_maxsim is None:
+        return None
+    tensors = (q_flat, c_flat, row_index, tokens_per_document,
+               document_offsets)
+    if not all(t.is_cuda for t in tensors):
+        return None
+    # All kernel inputs and tiling metadata must share one CUDA device.
+    if len({t.device for t in tensors}) != 1:
+        raise ValueError(
+            "fused indexed survivor pass inputs must be on one CUDA device")
+    if q_flat.dtype != torch.float32 or c_flat.dtype != torch.float32:
+        raise TypeError("fused indexed survivor pass requires float32 tokens")
+    if q_flat.ndim != 2 or c_flat.ndim != 2:
+        raise ValueError(
+            "fused indexed survivor pass requires 2D token matrices")
+    if q_flat.shape[1] != c_flat.shape[1]:
+        raise ValueError("token dimension mismatch between queries and corpus")
+    if document_offsets.dtype != torch.int64:
+        raise TypeError("fused indexed survivor pass requires int64 offsets")
+    if tokens_per_document.dtype != torch.int64:
+        raise TypeError(
+            "fused indexed survivor pass requires int64 tokens_per_document")
+    # int64 so query row-stride arithmetic is promoted: `token_rows_fit_int32`
+    # below deliberately does not guard the query side, on that assumption.
+    if row_index.dtype != torch.int64:
+        raise TypeError("fused indexed survivor pass requires int64 row_index")
+
+    # All four are addressed as contiguous buffers; torch strides are ignored,
+    # so a strided view would silently read the wrong elements.
+    q_flat = q_flat.contiguous()
+    c_flat = c_flat.contiguous()
+    row_index = row_index.contiguous()
+    document_offsets = document_offsets.contiguous()
+
+    # A valid offsets array always holds at least the leading 0, so an empty
+    # one is malformed — and would otherwise yield n_docs = -1 and a nonsense
+    # error from the length check below.
+    if document_offsets.numel() == 0:
+        raise ValueError(
+            "fused indexed survivor pass requires document offsets")
+
+    dev = q_flat.device
+    n_docs = int(document_offsets.numel()) - 1
+    K = int(q_flat.shape[1])
+    n_rows_idx = int(row_index.numel())
+
+    if int(tokens_per_document.numel()) != n_docs:
+        raise ValueError(
+            f"fused indexed survivor pass: tokens_per_document has "
+            f"{int(tokens_per_document.numel())} entries for {n_docs} "
+            "documents")
+    if n_docs <= 0:
+        if n_rows_idx:
+            raise ValueError(
+                f"fused indexed survivor pass: {n_rows_idx} rows to score but "
+                "no documents")
+        return torch.zeros(0, dtype=torch.float32, device=dev)
+
+    tok_bounds = torch.zeros(n_docs + 1, dtype=torch.int64, device=dev)
+    tok_bounds[1:] = tokens_per_document.cumsum(0)
+    n_tiles = (tokens_per_document + (block_m - 1)) // block_m
+
+    # Collect validation scalars in one device-to-host sync. Handle an empty
+    # row_index without calling min/max on it.
+    probe = [n_tiles.sum(), tokens_per_document.sum(), tokens_per_document.min()]
+    if n_rows_idx:
+        probe += [row_index.min(), row_index.max()]
+    vals = [int(v) for v in torch.stack(probe).tolist()]
+    total_programs, total_tokens, min_count = vals[0], vals[1], vals[2]
+    min_row, max_row = (vals[3], vals[4]) if n_rows_idx else (0, -1)
+
+    # Counts must be nonnegative; otherwise the document partition is invalid.
+    if min_count < 0:
+        raise ValueError(
+            f"fused indexed survivor pass: tokens_per_document has a negative "
+            f"entry ({min_count})")
+    # Counts must exactly partition `row_index`; otherwise the kernel can read
+    # past the index or leave part of `out` unwritten.
+    if total_tokens != n_rows_idx:
+        raise ValueError(
+            f"fused indexed survivor pass: tokens_per_document sums to "
+            f"{total_tokens}, but row_index has {n_rows_idx} entries")
+    # ROWIDX is used in raw pointer arithmetic, so indices must be in bounds.
+    if min_row < 0 or max_row >= int(q_flat.shape[0]):
+        raise ValueError(
+            f"fused indexed survivor pass: row_index range [{min_row}, "
+            f"{max_row}] is outside [0, {int(q_flat.shape[0])})")
+
+    if total_programs == 0:
+        return torch.zeros(n_rows_idx, dtype=torch.float32, device=dev)
+
+    prog_doc = torch.repeat_interleave(torch.arange(n_docs, device=dev), n_tiles)
+    # Tile ordinal within each document.
+    starts = torch.zeros(n_docs + 1, dtype=torch.int64, device=dev)
+    starts[1:] = n_tiles.cumsum(0)
+    tile_ord = torch.arange(total_programs, device=dev) - starts[prog_doc]
+    prog_base = tok_bounds[prog_doc] + tile_ord * block_m
+    prog_end = tok_bounds[prog_doc + 1]
+
+    # Corpus row addressing uses int32; query addressing is promoted by the
+    # int64 ROWIDX.
+    if not token_rows_fit_int32(int(c_flat.shape[0]), int(c_flat.stride(0))):
+        return None
+
+    out = torch.empty(n_rows_idx, dtype=torch.float32, device=dev)
+    _gemm_indexed_maxsim[(total_programs,)](
+        q_flat, c_flat,
+        row_index, prog_doc, prog_base, prog_end,
+        document_offsets, out,
+        K, q_flat.stride(0), c_flat.stride(0),
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+        EVEN_K=(K % block_k == 0),
+        num_warps=num_warps, num_stages=num_stages,
     )
     return out

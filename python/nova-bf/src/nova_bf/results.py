@@ -225,6 +225,8 @@ def provenance(
         "nova_bf.queries_path": cfg.queries.path,
         # Scoring precision. TF32 is ~3e-4 relative error; exact f32 otherwise.
         "nova_bf.allow_tf32": str(cfg.params.allow_tf32).lower(),
+        # Whether the multivector two-pass prune ran.
+        "nova_bf.multivector_prune": cfg.params.multivector_prune,
         # The column the corpus was scored from — its parquet dtype is a
         # property of those files, and nova-bf upcasts to f32 before scoring,
         # so the path plus this name is what pins the vector space down.

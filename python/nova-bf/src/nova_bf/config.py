@@ -18,7 +18,8 @@ from typing import Literal
 
 import yaml
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, field_validator,
+                      model_validator)
 
 from nova_bf.tokenize import tokenize
 from nova_bf.dates import is_epoch_format, normalize_date_fields, parse_scalar_epoch_us
@@ -248,6 +249,46 @@ class ParamsConfig(BaseModel):
     # CUDA stream while the current slice's GEMM/reduction/top-k work runs.
     # CPU and non-multivector paths remain synchronous.
     multivector_double_buffer: bool = False
+
+    # Optional FP16 pass for multivector pruning, enabled by default.
+    # It is admissible: live pairs are never pruned, so only the amount of work
+    # changes. Falls back to exact scoring when unsupported.
+    #
+    # "fp16": fused FP16 GEMM + document max with certified rounding bounds.
+    # "off":  score every query-document pair exactly.
+    #
+    # Pruning is not always faster: benefit depends on the prune rate and generally
+    # falls as k increases. It can also reorder exact ties because surviving FP32
+    # scores may differ by 1 ULP from the unpruned GEMM. Use "off" when pruning
+    # hurts performance or byte-for-byte reproducibility is required.
+    multivector_prune: Literal["off", "fp16"] = "fp16"
+
+    # Run the prune only while the recent prune rate is at least this value.
+    # 0.70 means at least 70% of pairs must be pruned; 0.0 disables the gate.
+    #
+    # The rate is continually re-probed because pruning improves as the running
+    # top-k threshold rises. While disabled, one unpruned slice per batch refreshes
+    # the estimate so pruning can re-engage later.
+    multivector_min_prune_rate: float = Field(default=0.70, ge=0.0, le=1.0)
+
+    @field_validator("multivector_prune", mode="before")
+    @classmethod
+    def _yaml_off_is_not_a_boolean(cls, v):
+        """Accept the YAML 1.1 boolean spelling of `off`.
+
+        `serde`-style YAML parses a bare `off` as the boolean False (likewise
+        `on`/`yes`/`no`), so a user writing the documented default
+
+            multivector_prune: off
+
+        would otherwise get `Input should be 'off' or 'fp16' ... input_value=
+        False`, which does not hint at quoting. Map it back rather than make
+        people write `"off"`. `on` is deliberately NOT mapped: there is more
+        than one way to enable this, so guessing which would be wrong.
+        """
+        if v is False:
+            return "off"
+        return v
     # Allow TF32 tensor-core matmuls on Ampere+ GPUs (CUDA only — a no-op on
     # CPU). OFF by default so ground truth stays bit-for-bit f32, matching
     # Qdrant's f32 scoring exactly. When on, the score matmul runs in TF32
