@@ -26,6 +26,306 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- optional exact audit of prune decisions --------------------------------
+#
+# Compares the FP16 prune against a full unpruned float32 MaxSim of the same
+# slice. The audit checks:
+#
+#   * STRUCTURE: live pairs are finite exactly where the reference is.
+#   * BOUND: `upper >= exact` for every graded pair.
+#   * DECISION: no pair reaching its threshold was pruned.
+#
+# Using the unpruned scorer also verifies that the bound is scorer-agnostic.
+
+_AUDIT = {
+    "offered": 0, "graded_slices": 0, "graded_pairs": 0,
+    "correct_prune": 0, "false_prune": 0, "correct_live": 0, "wasted_live": 0,
+    "graded_bounds": 0, "graded_scores": 0,
+    "score_mismatch": 0, "worst_score_gap": 0.0,
+    "bound_violations": 0, "worst_bound_gap": 0.0, "worst_false_prune": 0.0,
+    "min_headroom": None, "disabled": None,
+}
+
+_AUDIT_ENV = "NOVA_BF_MV_PRUNE_AUDIT"
+
+
+def check_audit_env() -> int:
+    """Validate the audit sampling rate ONCE, raising on a malformed value.
+
+    Called once at run start. `audit_rate` stays cheap and non-raising because
+    it runs per slice, and aborting a run hours in over an environment
+    variable would be worse than the typo.
+    """
+    import os
+
+    raw = os.environ.get(_AUDIT_ENV)
+    if raw is None or raw.strip() == "":
+        return 0
+    try:
+        v = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{_AUDIT_ENV}={raw!r} is not an integer. It asks for one pruned "
+            f"(slice, member) in N to be graded; 0 disables it. Refusing "
+            f"rather than running unaudited while looking audited.") from None
+    if v < 0:
+        raise ValueError(
+            f"{_AUDIT_ENV}={v} is negative. Use 0 to disable auditing.")
+    return v
+
+
+def audit_rate() -> int:
+    """Audit one pruned (slice, member) in N; 0 disables auditing.
+
+    The per-slice reader: deliberately non-raising, because it runs inside the
+    scoring loop. `check_audit_env` does the validation once at run start, so
+    a malformed value has already been rejected before this is ever reached.
+    """
+    import os
+
+    try:
+        v = int(os.environ.get(_AUDIT_ENV, "0"))
+    except ValueError:
+        return 0
+    return v if v >= 0 else 0
+
+
+def audit_stats() -> dict:
+    """Return cumulative audit counters for this process."""
+    return dict(_AUDIT)
+
+
+def audit_disabled() -> str | None:
+    """Return the audit failure that disabled pruning, if any."""
+    return _AUDIT_DISABLED
+
+
+def reset_audit_counters() -> None:
+    """Reset audit counters without clearing a prior audit disable."""
+    _AUDIT.update({
+        k: (
+            None if k in ("min_headroom", "disabled")
+            else 0.0 if isinstance(v, float)
+            else 0
+        )
+        for k, v in _AUDIT.items()
+    })
+
+
+def reset_audit() -> None:
+    """Clear the counters AND any disable the audit imposed."""
+    global _AUDIT_DISABLED
+
+    _AUDIT_DISABLED = None
+    _AUDIT.update({k: (None if k in ("min_headroom", "disabled") else
+                       (0.0 if isinstance(v, float) else 0))
+                   for k, v in _AUDIT.items()})
+
+
+def _audit_should_grade() -> bool:
+    """Whether this slice is the one in N that gets graded."""
+    rate = audit_rate()
+    if not rate:
+        return False
+    _AUDIT["offered"] += 1
+    return (_AUDIT["offered"] - 1) % rate == 0
+
+
+# Tolerance for "two exact float32 scorers agree". float32 dots and differ
+# only in reduction order, so a real disagreement is orders of magnitude 
+# larger than this.
+_SCORE_RTOL, _SCORE_ATOL = 1e-4, 1e-3
+
+def audit_decisions(exact, dead, thresholds, upper=None, scores=None) -> dict:
+    """Audit one slice against unpruned float32 MaxSim.
+
+    Checks prune decisions, bound admissibility, and survivor scores. Equality
+    with the threshold remains live. Any violation disables further pruning.
+    """
+    import torch
+
+    global _AUDIT_DISABLED
+
+    if exact.shape != dead.shape:
+        raise ValueError(
+            f"audit: exact scores {tuple(exact.shape)} do not match the prune "
+            f"mask {tuple(dead.shape)}")
+    if thresholds.ndim != 1 or thresholds.shape[0] != exact.shape[0]:
+        raise ValueError(
+            f"audit: threshold length {tuple(thresholds.shape)} != "
+            f"{exact.shape[0]} queries")
+
+    if upper is not None and upper.shape != exact.shape:
+        raise ValueError(
+            f"audit: bound {tuple(upper.shape)} does not match the exact "
+            f"scores {tuple(exact.shape)}")
+    if scores is not None and scores.shape != exact.shape:
+        raise ValueError(
+            f"audit: kept scores {tuple(scores.shape)} do not match the exact "
+            f"scores {tuple(exact.shape)}")
+
+    thr = thresholds[:, None]
+
+    # Decisions require finite exact scores and thresholds.
+    ok = torch.isfinite(exact) & torch.isfinite(thr)
+
+    # Audit every bound, including NaN and infinities.
+    ok_bound = (
+        torch.ones_like(exact, dtype=torch.bool)
+        if upper is not None
+        else torch.zeros_like(exact, dtype=torch.bool)
+    )
+
+    # Survivor structure is meaningful even for non-candidates such as `-inf`.
+    gradable = bool(ok.any() or ok_bound.any())
+    if scores is not None:
+        gradable = gradable or bool((~dead).any())
+    if not gradable:
+        return {}
+
+    should_live = ok & (exact >= thr)
+    live = ~dead
+
+    correct_prune = int((ok & dead & ~should_live).sum())
+    false_prune = ok & dead & should_live
+    n_false = int(false_prune.sum())
+    correct_live = int((ok & live & should_live).sum())
+    wasted_live = int((ok & live & ~should_live).sum())
+    n_graded = int(ok.sum())
+
+    _AUDIT["graded_slices"] += 1
+    _AUDIT["graded_pairs"] += n_graded
+    _AUDIT["graded_bounds"] += int(ok_bound.sum()) if upper is not None else 0
+    _AUDIT["correct_prune"] += correct_prune
+    _AUDIT["correct_live"] += correct_live
+    _AUDIT["wasted_live"] += wasted_live
+
+    n_viol, worst_gap = 0, 0.0
+    if upper is not None and bool(ok_bound.any()):
+        # `~(upper >= exact)` also catches NaN and -inf bounds.
+        violated = ok_bound & ~(upper >= exact)
+        n_viol = int(violated.sum())
+
+        # Headroom is meaningful only for finite pairs.
+        fin_pair = torch.isfinite(exact) & torch.isfinite(upper)
+        headroom = (
+            float((upper - exact)[fin_pair].min())
+            if bool(fin_pair.any())
+            else None
+        )
+        if headroom is not None:
+            _AUDIT["min_headroom"] = (
+                headroom if _AUDIT["min_headroom"] is None
+                else min(_AUDIT["min_headroom"], headroom)
+            )
+
+        if n_viol:
+            gaps = (exact - upper)[violated]
+            gaps = gaps[torch.isfinite(gaps)]
+            worst_gap = (
+                float(gaps.max()) if gaps.numel() else float("inf")
+            )
+            _AUDIT["bound_violations"] += n_viol
+            _AUDIT["worst_bound_gap"] = max(
+                _AUDIT["worst_bound_gap"], worst_gap
+            )
+
+    # Compare every survivor against the independent scorer.
+    n_bad_score, worst_score = 0, 0.0
+    if scores is not None:
+        live = ~dead
+        if bool(live.any()):
+            fin_e = torch.isfinite(exact)
+            fin_s = torch.isfinite(scores)
+
+            # Live pairs must match the reference category exactly.
+            bad = live & (torch.isnan(exact) | torch.isnan(scores))
+            bad = bad | (
+                live
+                & (torch.isneginf(exact) != torch.isneginf(scores))
+            )
+            bad = bad | (
+                live
+                & (torch.isposinf(exact) != torch.isposinf(scores))
+            )
+            bad = bad | (live & (fin_e != fin_s))
+
+            # Compare values only where both sides are finite.
+            both = live & fin_e & fin_s
+            diff = (scores - exact).abs()
+            bad = bad | (
+                both
+                & (
+                    diff
+                    > _SCORE_ATOL + _SCORE_RTOL * exact.abs()
+                )
+            )
+
+            n_bad_score = int(bad.sum())
+            _AUDIT["graded_scores"] += int(live.sum())
+
+            if n_bad_score:
+                gaps = diff[bad & torch.isfinite(diff)]
+                worst_score = (
+                    float(gaps.max()) if gaps.numel() else float("inf")
+                )
+                _AUDIT["score_mismatch"] += n_bad_score
+                _AUDIT["worst_score_gap"] = max(
+                    _AUDIT["worst_score_gap"], worst_score
+                )
+
+    if n_false:
+        worst = float(
+            (exact - thr.expand_as(exact))[false_prune].max()
+        )
+        _AUDIT["false_prune"] += n_false
+        _AUDIT["worst_false_prune"] = max(
+            _AUDIT["worst_false_prune"], worst
+        )
+
+    if n_false or n_viol or n_bad_score:
+        reason = (
+            f"audit found {n_viol} pairs whose bound fell BELOW their "
+            f"exact score (by up to {worst_gap:.3e}), {n_false} "
+            f"pruned pairs that reach their threshold, and "
+            f"{n_bad_score} SURVIVORS scored wrong (by up to "
+            f"{worst_score:.3e}), out of {n_graded} graded"
+        )
+        _AUDIT["disabled"] = reason
+        _AUDIT_DISABLED = reason
+        logger.error(
+            "float16 multivector prune AUDIT FAILURE: %s. Pruning is disabled "
+            "for the rest of this process; treat this run's output as "
+            "incomplete.",
+            reason,
+        )
+
+    return {
+        "graded": n_graded,
+        "correct_prune": correct_prune,
+        "false_prune": n_false,
+        "correct_live": correct_live,
+        "wasted_live": wasted_live,
+        "bound_violations": n_viol,
+        "score_mismatch": n_bad_score,
+    }
+
+# Set by a failed audit; checked by `Fp16State.score`.
+_AUDIT_DISABLED: str | None = None
+
+
+# How the throughput gate behaved, for the end-of-run line.
+_GATE = {"open": 0, "closed": 0, "latched": 0, "unlatched": 0}
+
+
+def gate_stats() -> dict:
+    """Cumulative gate decisions for this process."""
+    return dict(_GATE)
+
+
+def reset_gate_stats() -> None:
+    _GATE.update({k: 0 for k in _GATE})
+
 
 def certify(dim: int, device) -> str | None:
     """Reason this device may not prune with the float16 bound, or `None`.
@@ -87,6 +387,12 @@ def to_half(x, n_max: float | None = None):
     return h
 
 
+# Binary64 working-set budget for `norm_upper`'s chunking. Small enough that
+# the widened copy is never the allocation that fails, large enough that the
+# per-chunk device->host `max` is not the cost.
+_NORM_CHUNK_BYTES = 64 << 20
+
+
 def norm_upper(x) -> float:
     """Return an upper bound on the largest row norm.
 
@@ -98,7 +404,17 @@ def norm_upper(x) -> float:
         raise ValueError("norm_upper expects a 2D (tokens, dim) matrix")
     if x.numel() == 0:
         return 0.0
-    n = float(x.double().norm(dim=1).max())
+    # Chunked, because `x.double()` on the whole matrix transiently doubles
+    # its footprint
+    dim = int(x.shape[1])
+    per_chunk = max(1, _NORM_CHUNK_BYTES // (dim * 8))
+    # Seeded at -inf and compared with an explicit NaN check.
+    n = float("-inf")
+    for i in range(0, int(x.shape[0]), per_chunk):
+        v = float(x[i:i + per_chunk].double().norm(dim=1).max())
+        if v != v:
+            return v                        # NaN propagates; callers refuse
+        n = max(n, v)
     # gamma_n = n*u / (1 - n*u) with u = 2^-53, binary64's unit roundoff.
     k = (int(x.shape[1]) + 2) * 2.0 ** -53
     return n * (1.0 + k / (1.0 - k)) * (1.0 + 2.0 ** -40)
@@ -171,14 +487,17 @@ def slack(q_tokens, q_norm_max: float, d_norm_max: float, dim: int):
 
 def _pruned_maxsim_scores(q_flat, c_flat, q_offsets, doc_offsets, thresholds,
                          *, q_half=None, q_norm_max=None,
-                         certified: bool = False):
+                         certified: bool = False, want_upper: bool = False):
     """Compute MaxSim with provably dead pairs left at `-inf`.
 
     Internal fast path used by `Fp16State.score`. Cached `q_half`,
     `q_norm_max`, and `certified=True` are trusted caller invariants; stale
     values can weaken admissibility.
 
-    Returns `(scores, dead)`, or `None` when the FP16 pass cannot safely run.
+    Returns `(scores, dead, upper)`, or `None` when the FP16 pass cannot
+    safely run. `upper` is the bound each pair was pruned with, returned only
+    for `want_upper=True` (the audit) and `None` otherwise, so an ordinary
+    slice does not keep a second score-sized tensor alive.
     """
     import torch
 
@@ -226,7 +545,7 @@ def _pruned_maxsim_scores(q_flat, c_flat, q_offsets, doc_offsets, thresholds,
 
     out = torch.full((n_q, n_rows), float("-inf"), dtype=c_flat.dtype, device=dev)
     if n_rows == 0 or c_flat.shape[0] == 0 or q_flat.shape[0] == 0:
-        return out, torch.ones((n_q, n_rows), dtype=torch.bool, device=dev)
+        return out, torch.ones((n_q, n_rows), dtype=torch.bool, device=dev), None
 
     if not certified:
         reason = certify(int(c_flat.shape[1]), dev)
@@ -264,49 +583,53 @@ def _pruned_maxsim_scores(q_flat, c_flat, q_offsets, doc_offsets, thresholds,
 
     with _mark("mvfp16_bound"):
         s = slack(q_off.diff(), qn_max, d_norm_max, int(c_flat.shape[1]))
-        dead = prune_mask(
-            upper_bound(approx, s[:, None]), thresholds)
+        up = upper_bound(approx, s[:, None])
+        dead = prune_mask(up, thresholds)
 
-    score_survivors(dead, q_flat, c_flat, q_off, d_off_cpu, out, d_off=d_off)
-    return out, dead
+    score_survivors(dead, q_flat, c_flat, q_off, d_off_cpu, out)
+    return out, dead, (up if want_upper else None)
 
 
 class Fp16State:
     """Run-wide state for float16 multivector pruning.
 
-    Caches certification by (token dimension, device) and the query tensor's
-    float16 copy and norm bound. Unsupported configurations decline pruning
-    rather than affecting results.
+    Caches certification by (dimension, device) and query float16/norm state.
+    Unsupported configurations fall back to unpruned scoring.
     """
 
-    __slots__ = ("_certified_dims", "_failed", "_q_src", "_q_ver", "_q_half",
-                 "_q_norm_max", "_warned", "min_prune_rate", "_prune_ema",
-                 "_skipped", "_gate_logged")
+    __slots__ = (
+        "_certified_dims", "_failed", "_q_cache", "_warned",
+        "min_prune_rate", "_latched", "_good", "_bad",
+    )
 
-    # Last-resort re-engage even if no unpruned slice has been observed
-    _REPROBE_EVERY = 256
+    # Keep both raw and normalized query representations without unbounded
+    # GPU-memory growth.
+    _Q_CACHE_MAX = 2
 
-    # Weight on the newest observation. High enough to follow a rate that is
-    # still climbing, low enough that one unusual slice does not flip the gate.
-    _EMA_ALPHA = 0.3
+    # Engage quickly when pruning appears useful; require more evidence to
+    # disengage once the achieved rate falls below the configured floor.
+    _LATCH_AFTER = 3
+    _UNLATCH_AFTER = 10
 
     def __init__(self, min_prune_rate: float = 0.0):
         rate = float(min_prune_rate)
         if not 0.0 <= rate <= 1.0:
             raise ValueError(f"min_prune_rate must be in [0, 1], got {rate!r}")
+
         self._certified_dims: set[tuple] = set()
         self._failed: dict[tuple, str] = {}
-        # Keyed by identity AND torch's in-place version counter:
-        self._q_src = None
-        self._q_ver = None
-        self._q_half = None
-        self._q_norm_max: float | None = None
+
+        # Cache by tensor identity and in-place version to detect replacement or mutation.
+        self._q_cache: list = []
         self._warned = False
-        # Engage only while the observed prune rate is at or above this
+
+        # Prune-rate floor used by the throughput gate.
         self.min_prune_rate = rate
-        self._prune_ema: float | None = None
-        self._skipped = 0
-        self._gate_logged = False
+
+        # A zero floor means pruning should start enabled.
+        self._latched = rate <= 0.0
+        self._good = 0
+        self._bad = 0
 
     def _ensure_certified(self, dim: int, device) -> bool:
         key = (dim, str(device))
@@ -333,87 +656,116 @@ class Fp16State:
             "still scores every survivor", dim, device)
         return True
 
-    def note_pruned(self, n_pruned: int, n_pairs: int) -> None:
-        """Record what fraction of the last slice's pairs were ruled out.
+    def note_probe(self, n_pruned: int, n_pairs: int) -> None:
+        """Record estimated prune effectiveness from an unpruned slice.
 
-        Fed from counts the caller has ALREADY materialized for its own tally,
-        so maintaining the gate costs no extra device->host sync.
+        This is optimistic: exact scores below threshold are potentially prunable,
+        while the actual bound may remove only a subset.
         """
-        if n_pairs <= 0:
+        if n_pairs <= 0 or self._latched:
             return
-        rate = n_pruned / n_pairs
-        self._prune_ema = (rate if self._prune_ema is None
-                           else (1.0 - self._EMA_ALPHA) * self._prune_ema
-                           + self._EMA_ALPHA * rate)
 
-    def wants_probe(self) -> bool:
-        """Whether an unpruned slice should refresh the prune-rate estimate.
+        if n_pruned / n_pairs >= self.min_prune_rate:
+            self._good += 1
+            if self._good >= self._LATCH_AFTER:
+                self._latched = True
+                self._bad = 0
+                _GATE["latched"] += 1
+                logger.info(
+                    "float16 multivector prune engaged: %d consecutive probes "
+                    "found at least %.0f%% of pairs prunable",
+                    self._good, 100.0 * self.min_prune_rate)
+        else:
+            self._good = 0
+    
+def note_pruned(self, n_pruned: int, n_pairs: int) -> None:
+    """Record the prune rate actually achieved by a pruned slice.
 
-        Useful only while the gate is closed; an open gate already updates the
-        estimate from its own pruning results. Probe cadence is managed by the
-        caller.
-        """
-        return (self._prune_ema is not None
-                and self._prune_ema < self.min_prune_rate)
+    Disengages after repeated slices fall below the configured prune-rate floor.
+    """
+    if n_pairs <= 0 or not self._latched:
+        return
 
-    def _gate_open(self) -> bool:
-        """Whether the recent prune rate justifies running pass one.
+    if n_pruned / n_pairs >= self.min_prune_rate:
+        self._bad = 0
+        return
 
-        The gate can reopen as the top-k threshold rises. Periodic speculative
-        retries are a backstop when no unpruned probe has refreshed the estimate.
-        """
-        if self._prune_ema is None or self._prune_ema >= self.min_prune_rate:
-            self._skipped = 0
-            return True
-        self._skipped += 1
-        if self._skipped >= self._REPROBE_EVERY:
-            self._skipped = 0
-            return True                      # periodic re-probe
-        if not self._gate_logged:
-            self._gate_logged = True
-            logger.info(
-                "float16 multivector prune gated off: pruning %.1f%% of "
-                "pairs against a %.1f%% floor, so pass one costs more than it "
-                "saves. It re-engages on its own — the rate is re-read from "
-                "unpruned slices as the top-K fills. Set "
-                "params.multivector_min_prune_rate=0.0 to disable the gate.",
-                100.0 * self._prune_ema, 100.0 * self.min_prune_rate)
-        return False
+    self._bad += 1
+    if self._bad >= self._UNLATCH_AFTER:
+        self._latched = False
+        self._good = 0
+        _GATE["unlatched"] += 1
+        logger.info(
+            "float16 multivector prune disengaged: %d consecutive slices "
+            "pruned less than %.0f%% of pairs, so pass one is costing more "
+            "than it saves. Set params.multivector_min_prune_rate=0.0 to "
+            "keep it on regardless.",
+            self._bad, 100.0 * self.min_prune_rate)
 
-    def score(self, q_flat, c_flat, q_offsets, doc_offsets, thresholds):
-        """`(scores, dead)` for this slice, or `None` to score it normally."""
-        if c_flat.shape[0] == 0 or q_flat.shape[0] == 0:
+
+def wants_probe(self) -> bool:
+    """Whether an unpruned slice should refresh the gate estimate."""
+    return not self._latched
+
+
+def gate_open(self) -> bool:
+    """Whether to run the pruning pass on this slice."""
+    if self._latched:
+        _GATE["open"] += 1
+        return True
+
+    _GATE["closed"] += 1
+    return False
+
+
+def score(self, q_flat, c_flat, q_offsets, doc_offsets, thresholds):
+    """Return `(scores, dead, upper)`, or `None` to use unpruned scoring.
+
+    `upper` is returned only when this slice is selected for auditing.
+    """
+    if _AUDIT_DISABLED is not None:
+        return None
+    if c_flat.shape[0] == 0 or q_flat.shape[0] == 0:
+        return None
+    if not self._ensure_certified(int(c_flat.shape[1]), c_flat.device):
+        return None
+
+    ver = getattr(q_flat, "_version", None)
+    hit = next(
+        (e for e in self._q_cache if e[0] is q_flat and e[1] == ver),
+        None,
+    )
+
+    if hit is None:
+        qn = norm_upper(q_flat)
+        qh = to_half(q_flat, n_max=qn)
+
+        if qh is None:
+            # Fall back safely if this query representation cannot use FP16.
+            if not self._warned:
+                self._warned = True
+                logger.warning(
+                    "float16 cannot represent these query tokens; scoring "
+                    "this slice without the prune"
+                )
             return None
-        if not self._gate_open():
-            return None
-        if not self._ensure_certified(int(c_flat.shape[1]), c_flat.device):
-            return None
 
-        ver = getattr(q_flat, "_version", None)
-        if self._q_src is not q_flat or self._q_ver != ver:
-            qn = norm_upper(q_flat)
-            qh = to_half(q_flat, n_max=qn)
-            if qh is None:
-                # Not fatal for the RUN: another query set or slice may be
-                # representable. Warn once so it is not silently slow.
-                if not self._warned:
-                    self._warned = True
-                    logger.warning(
-                        "float16 cannot represent these query tokens; scoring "
-                        "this slice without the prune")
-                return None
-            # Everything that can fail has already happened, and the keys the
-            # hit test reads are assigned LAST — publishing them first would
-            # leave a window where a failure above pairs the new key with the
-            # PREVIOUS query set's norm.
-            self._q_half, self._q_norm_max = qh, qn
-            self._q_src, self._q_ver = q_flat, ver
+        # Publish the cache entry only after all derived state is valid.
+        hit = (q_flat, ver, qh, qn)
+        self._q_cache.append(hit)
+        del self._q_cache[:-self._Q_CACHE_MAX]
 
-        return _pruned_maxsim_scores(q_flat, c_flat, q_offsets, doc_offsets,
-                                     thresholds, q_half=self._q_half,
-                                     q_norm_max=self._q_norm_max,
-                                     certified=True)
-
+    return _pruned_maxsim_scores(
+        q_flat,
+        c_flat,
+        q_offsets,
+        doc_offsets,
+        thresholds,
+        q_half=hit[2],
+        q_norm_max=hit[3],
+        certified=True,
+        want_upper=_audit_should_grade(),
+    )
 
 # ---------------------------------------------------------------------------
 # Ragged helpers, the bound primitives, and the exact survivor pass. Only
@@ -501,20 +853,11 @@ def _mark(name):
     return record_function(name)
 
 
-# Live fraction below which the fused survivor kernel beats the torch gather.
-# See the table in `score_survivors`; the measured crossover is ~3% live.
-_FUSED_SURVIVOR_MAX_LIVE = 0.03
-
-
-def score_survivors(dead, q_flat, c_flat, q_off, d_off_cpu, out, *,
-                    d_off=None, force_torch=False):
+def score_survivors(dead, q_flat, c_flat, q_off, d_off_cpu, out):
     """Score every surviving (query, document) pair exactly.
 
-    Survivors are enumerated once for the slice and grouped by document. At low
-    live fractions, a fused indexed kernel avoids repeated query-token gathers;
-    otherwise the PyTorch/cuBLAS path is faster.
-
-    `force_torch` selects the fallback for equivalence testing.
+    Survivors are grouped by document; per-token maxima are written to one
+    buffer and folded into MaxSim scores once at the end.
     """
     import torch
 
@@ -525,114 +868,74 @@ def score_survivors(dead, q_flat, c_flat, q_off, d_off_cpu, out, *,
 
     dev = c_flat.device
     n_rows = out.shape[1]
-    pairs = (~dead).nonzero()                       # (n_pairs, 2) = (query, doc)
+    pairs = (~dead).nonzero()  # (query, document)
     if pairs.shape[0] == 0:
         return out
-    # Group survivors by document, preserving query order within one: the row
-    # reads are then sequential rather than scattered.
-    pairs = pairs[torch.argsort(pairs[:, 1], stable=True)]
 
-    # The fused kernel removes the torch path's repeated gather, but its
-    # float32 `tl.dot` must run `input_precision="ieee"` to match the exact
-    # path.
-    fused = None
-    live_frac = float(pairs.shape[0]) / max(dead.numel(), 1)
-    if not force_torch and dev.type == "cuda" and live_frac <= _FUSED_SURVIVOR_MAX_LIVE:
-        fused = _score_survivors_fused(pairs, q_flat, c_flat, q_off,
-                                       d_off, out, n_rows)
-    if fused is not None:
-        return fused
+    # Group by document while preserving query order within each document.
+    pairs = pairs[torch.argsort(pairs[:, 1], stable=True)]
 
     counts = torch.bincount(pairs[:, 1], minlength=n_rows)
     pair_len = q_off[pairs[:, 0] + 1] - q_off[pairs[:, 0]]
+    d_tok = torch.as_tensor(d_off_cpu).diff().to(dev)
     zero = torch.zeros(1, dtype=torch.int64, device=dev)
 
-    # Where each document's survivors start, and how many token rows they span.
-    # Both land on the host HERE, in the only two syncs this function performs,
-    # so that nothing inside the loop has to ask the device a question.
+    # Materialize loop bounds once so the per-document loop does not sync.
     bounds = torch.cat([zero, counts.cumsum(0)]).cpu()
     tok_bounds = torch.cat([zero, pair_len.cumsum(0)]).cpu()
+
+    # Store all survivor token maxima in one buffer; fold them once afterward.
+    n_tok_total = int(tok_bounds[-1])
+    flat_max = torch.zeros(n_tok_total, dtype=torch.float32, device=dev)
+
     for j in range(n_rows):
         lo, hi = int(bounds[j]), int(bounds[j + 1])
         if hi <= lo:
             continue
+
         c0, c1 = int(d_off_cpu[j]), int(d_off_cpu[j + 1])
         if c1 <= c0:
             continue
-        total = int(tok_bounds[hi]) - int(tok_bounds[lo])
+
+        t_lo, t_hi = int(tok_bounds[lo]), int(tok_bounds[hi])
+        total = t_hi - t_lo
         if total == 0:
             continue
+
         live = pairs[lo:hi, 0]
         lengths = pair_len[lo:hi]
+
         with _mark("mvprune_survivor_gather"):
-            Qg = q_flat[_ragged_gather_index(q_off, live, lengths, total)]
+            Qg = q_flat[
+                _ragged_gather_index(q_off, live, lengths, total)
+            ]
+
         with _mark("mvprune_survivor_gemm"):
-            m = (Qg @ c_flat[c0:c1].T).max(dim=1).values
-        with _mark("mvprune_survivor_fold"):
-            seg = torch.repeat_interleave(
-                torch.arange(live.numel(), device=dev), lengths,
-                output_size=total)
-            acc = torch.zeros(live.numel(), dtype=torch.float64, device=dev)
-            acc.index_add_(0, seg, m.double())
-            # Zero-token queries are non-candidates: their accumulator is still
-            # the initial zero, which would outrank every negative score.
-            keep = lengths > 0
-            out[live[keep], j] = acc[keep].to(out.dtype)
-    return out
-
-
-def _score_survivors_fused(pairs, q_flat, c_flat, q_off, d_off, out, n_rows):
-    """Score all survivors with one indexed GEMM launch.
-
-    Builds the required query-token row indices grouped by document and lets the
-    kernel read those rows directly instead of materializing a gathered matrix.
-    Returns `None` if the fused kernel cannot run.
-    """
-    import torch
-
-    try:
-        from nova_bf.multivector_kernels import fused_indexed_token_maxima
-    except ImportError:
-        return None
-    if d_off is None or q_flat.dtype != torch.float32 \
-            or c_flat.dtype != torch.float32:
-        return None
-
-    dev = c_flat.device
-    with _mark("mvprune_survivor_index"):
-        live_q = pairs[:, 0]
-        live_d = pairs[:, 1]
-        # Tokens each surviving pair contributes, and where they start.
-        lengths = (q_off[live_q + 1] - q_off[live_q])
-        total = int(lengths.sum())
-        if total == 0:
-            return out
-        seg = torch.repeat_interleave(
-            torch.arange(pairs.shape[0], device=dev), lengths,
-            output_size=total)
-        starts = torch.zeros(pairs.shape[0] + 1, dtype=torch.int64, device=dev)
-        starts[1:] = lengths.cumsum(0)
-        row_index = q_off[live_q][seg] + (
-            torch.arange(total, device=dev) - starts[seg])
-        # Query-token rows assigned to each document.
-        tokens_per_doc = torch.zeros(n_rows, dtype=torch.int64, device=dev)
-        tokens_per_doc.index_add_(0, live_d, lengths)
-
-    with _mark("mvprune_survivor_gemm_fused"):
-        per_tok = fused_indexed_token_maxima(
-            q_flat, c_flat, row_index, tokens_per_doc, d_off)
-    if per_tok is None:
-        return None
+            torch.amax(
+                Qg @ c_flat[c0:c1].T,
+                dim=1,
+                out=flat_max[t_lo:t_hi],
+            )
 
     with _mark("mvprune_survivor_fold"):
-        # Match the Torch path's float64 outer accumulation.
-        acc = torch.zeros(pairs.shape[0], dtype=torch.float64, device=dev)
-        acc.index_add_(0, seg, per_tok.double())
-        # Keep zero-token queries and empty documents at `-inf`.
-        has_tokens = lengths > 0
-        empty_doc = (d_off[live_d + 1] - d_off[live_d]) == 0
-        keep = has_tokens & ~empty_doc
-        out[live_q[keep], live_d[keep]] = acc[keep].to(out.dtype)
+        # int32 saves memory; pair IDs must fit in int32.
+        seg = torch.repeat_interleave(
+            torch.arange(
+                pairs.shape[0], dtype=torch.int32, device=dev
+            ),
+            pair_len.to(torch.int32),
+            output_size=n_tok_total,
+        )
+
+        acc = torch.zeros(
+            pairs.shape[0], dtype=torch.float64, device=dev
+        )
+        acc.index_add_(0, seg, flat_max.double())
+
+        # Zero-token queries and empty documents remain non-candidates.
+        keep = (pair_len > 0) & (d_tok[pairs[:, 1]] > 0)
+        out[pairs[keep, 0], pairs[keep, 1]] = acc[keep].to(out.dtype)
+
     return out
 
 

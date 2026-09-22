@@ -80,7 +80,7 @@ def _assert_admissible(q_flat, q_off, c_flat, c_off, thr):
     res = mv_fp16._pruned_maxsim_scores(q_flat, c_flat, q_off, c_off, thr,
                                        certified=True)
     assert res is not None, "float16 pass declined; the test would be vacuous"
-    scores, dead = res
+    scores, dead, _ = res
     ref = exact_path(q_flat, q_off, c_flat, c_off)
     at_or_above = ref >= thr[:, None]
     dropped = int((dead & at_or_above).sum())
@@ -286,8 +286,8 @@ def test_zero_token_queries_stay_non_candidates(certified):
     becoming 0 via an empty sum."""
     q, q_off, c, c_off = _fixed_case()
     thr = torch.full((q_off.numel() - 1,), -1e30, device="cuda")
-    scores, _ = mv_fp16._pruned_maxsim_scores(q, c, q_off, c_off, thr,
-                                             certified=True)
+    scores, _, _ = mv_fp16._pruned_maxsim_scores(q, c, q_off, c_off, thr,
+                                                certified=True)
     empty = q_off.diff() == 0
     assert bool(empty.any()), "the fixture no longer has a zero-token query"
     assert bool(torch.isneginf(scores[empty]).all())

@@ -22,7 +22,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from nova_bf.compute import _mv_full_threshold
-from nova_bf.tiebreak import pack_score
+from nova_bf.tiebreak import pack
 
 
 class _Q:
@@ -31,7 +31,11 @@ class _Q:
 
 
 def _packed(values):
-    return pack_score(torch.tensor(values, dtype=torch.float32))
+    """Thresholds reach `_mv_full_threshold` packed, as the running top-K
+    holds them: the float32 score in the high half, the tiebreak ordinal in
+    the low half."""
+    scores = torch.tensor(values, dtype=torch.float32)
+    return pack(scores, torch.zeros(len(values), dtype=torch.int64))
 
 
 def test_full_selection_expands_unchanged():
@@ -86,3 +90,25 @@ def test_all_negative_infinity_means_nothing_is_prunable_yet():
 def test_a_subset_with_no_finite_threshold_also_declines():
     assert _mv_full_threshold(_Q(5), _packed([float("-inf")] * 2),
                               slice(1, 3)) is None
+
+
+def test_an_index_tensor_selection_is_handled():
+    """`_row_selector` hands back an on-device int64 index tensor whenever a
+    search's `rows` are non-contiguous, so this is a live production path and
+    not the hypothetical the comment used to call it."""
+    sel = torch.tensor([0, 3, 4], dtype=torch.int64)
+    out = _mv_full_threshold(_Q(6), _packed([1.0, 2.0, 3.0]), sel)
+    assert out[[0, 3, 4]].tolist() == [1.0, 2.0, 3.0]
+    assert torch.isneginf(out[[1, 2, 5]]).all()
+
+
+def test_a_boolean_mask_selection_is_handled():
+    mask = torch.tensor([True, False, True, False])
+    out = _mv_full_threshold(_Q(4), _packed([5.0, 7.0]), mask)
+    assert out[0].item() == 5.0 and out[2].item() == 7.0
+    assert torch.isneginf(out[[1, 3]]).all()
+
+
+def test_an_index_tensor_of_the_wrong_length_is_refused():
+    with pytest.raises(ValueError, match="threshold length"):
+        _mv_full_threshold(_Q(6), _packed([1.0]), torch.tensor([0, 3, 4]))

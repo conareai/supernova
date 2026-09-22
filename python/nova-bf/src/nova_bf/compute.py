@@ -49,6 +49,7 @@ import numpy as np
 from tqdm import tqdm
 
 from nova_bf import manifest as run_manifest
+from nova_bf import mv_fp16
 from nova_bf import profiling
 from nova_bf import topk_triton
 from nova_bf import twopass
@@ -3176,13 +3177,10 @@ def _mv_full_threshold(Q, thr_packed, qsel):
     if qsel is None:
         n_sel = Q.n_q
     elif isinstance(qsel, slice):
-        # `indices()` resolves None/negative bounds and any step, so this is
-        # right even for a selection that is not the contiguous step-1 block
-        # `_plain_block` elsewhere assumes — `stop - start` would not be.
+        # Count the rows selected by the resolved slice.
         n_sel = len(range(*qsel.indices(Q.n_q)))
     else:
-        # Not reachable today (`qsel` is None or a slice), but cheap to keep
-        # correct if that ever widens to a mask or an index tensor.
+        # Boolean masks and explicit row-index selectors are both supported.
         n_sel = int(qsel.sum()) if qsel.dtype == torch.bool else int(qsel.numel())
 
     if thr.shape[0] != n_sel:
@@ -3190,67 +3188,75 @@ def _mv_full_threshold(Q, thr_packed, qsel):
         raise ValueError(
             f"multivector prune: threshold length {thr.shape[0]} != {n_sel} "
             f"{owned}, which would broadcast and prune against the wrong "
-            "query's top-K")
+            "query's top-K"
+        )
 
     if qsel is None:
         full_thr = thr
     else:
-        full_thr = torch.full((Q.n_q,), float("-inf"), dtype=thr.dtype,
-                              device=thr.device)
+        full_thr = torch.full(
+            (Q.n_q,), float("-inf"), dtype=thr.dtype, device=thr.device
+        )
         full_thr[qsel] = thr
+
     if not bool(torch.isfinite(full_thr).any()):
         return None
     return full_thr
 
 
 def _mv_note_unpruned_rate(mv_state, scores, Q, thr_packed, qsel) -> bool:
-    """Teach the prune's gate from a slice that was scored WITHOUT it.
+    """Estimate prune effectiveness from an unpruned slice.
 
-    `scores >= threshold` is the live fraction the prune would have been left
-    with, so a slice the gate skipped still tells it whether skipping was
-    right. Without this the gate could only learn by engaging, which means
-    paying for a whole pass one (~195 ms on a production slice) just to look —
-    and the rate it is trying to observe climbs over the run, so it would have
-    to keep looking.
-
-    Returns whether it actually measured, so the caller can spend its
-    once-per-batch probe on a slice that taught it something.
+    Uses exact scores to estimate how many pairs could fall below the current
+    thresholds. Returns whether a measurement was recorded.
     """
     import torch
 
     if not mv_state.wants_probe():
         return False
+
     thr = _mv_full_threshold(Q, thr_packed, qsel)
     if thr is None:
-        return False                # nothing has a threshold; nothing to learn
-    # The one device->host sync this costs, which is why the caller spends it
-    # once per batch rather than per slice.
-    live = scores >= thr[:, None]
-    n_pairs = live.numel()
-    mv_state.note_pruned(
-        n_pairs - int(live.sum(dtype=torch.int64).item()), n_pairs)
+        return False
+
+    # Only rows with finite thresholds are owned and currently prunable.
+    owned = torch.isfinite(thr)
+    live = (scores >= thr[:, None]) & owned[:, None]
+
+    # Collect both counts with one device-to-host sync.
+    n_live, n_owned = torch.stack(
+        [live.sum(dtype=torch.int64), owned.sum(dtype=torch.int64)]
+    ).tolist()
+
+    n_pairs = int(n_owned) * int(scores.shape[1])
+    if n_pairs <= 0:
+        return False
+
+    mv_state.note_probe(n_pairs - int(n_live), n_pairs)
     return True
 
+def _mv_pruned_scores(sl, Q, metric, mv_state, thr_packed, qsel, tally=None):
+    """Score one multivector member with provably dead pairs at `-inf`.
 
-def _mv_pruned_scores(sl, Q, metric, mv_state, thr_packed, qsel):
-    """Multivector scores for ONE member with provably-dead pairs at -inf.
-
-    Returns None when the prune cannot apply, in which case the caller scores
-    normally. Declining is always safe: it costs throughput, never correctness.
-
-    The result is NOT shared through `score_cache`. Pruned scores depend on
-    THIS member's running threshold, so two searches over the same metric would
-    otherwise read each other's prune decisions — and the one with the looser
-    threshold would inherit the tighter one's, dropping live candidates.
+    Returns `None` when pruning cannot apply. Results are not cached because
+    pruning depends on this member's current top-k thresholds.
     """
     import torch
 
     if mv_state is None or not isinstance(sl, MultiVectorBatchSlice):
         return None
+
+    # Avoid normalization and threshold work while the gate is closed.
+    if not mv_state.gate_open():
+        return None
+
     _MV_PRUNE["calls"] += 1
-    # `cosine` scores per-token-normalized vectors, so that — not the raw
-    # token — is the representation pass one must round.
-    c_flat = torch.nn.functional.normalize(sl.flat, dim=1) if metric == "cosine" else sl.flat
+
+    # Pass one must use the same normalized representation as cosine scoring.
+    c_flat = (
+        torch.nn.functional.normalize(sl.flat, dim=1)
+        if metric == "cosine" else sl.flat
+    )
     q_flat = Q.flat_normalized if metric == "cosine" else Q.flat
 
     thr_all = _mv_full_threshold(Q, thr_packed, qsel)
@@ -3258,37 +3264,133 @@ def _mv_pruned_scores(sl, Q, metric, mv_state, thr_packed, qsel):
         _MV_PRUNE["declined"] += 1
         return None
 
-    # Sync THIS SLICE's device
     timing = bool(os.environ.get("NOVA_BF_PRUNE_TIMING"))
     dev = c_flat.device
     if timing and dev.type == "cuda":
         torch.cuda.synchronize(dev)
     t0 = time.perf_counter() if timing else 0.0
+
     res = mv_state.score(q_flat, c_flat, Q.offsets, sl.doc_offsets, thr_all)
-    # Stop the clock BEFORE the decline check.
+
     if timing:
         if dev.type == "cuda":
             torch.cuda.synchronize(dev)
         _MV_PRUNE["sec"] += time.perf_counter() - t0
+
     if res is None:
         _MV_PRUNE["declined"] += 1
         return None
-    scores, dead = res
 
-    n_pairs = int(dead.numel())
-    n_pruned = int(dead.sum())
+    scores, dead, upper = res
+
+    # Count only rows this member owns.
+    owned = torch.isfinite(thr_all)
+    n_pruned, n_owned = torch.stack(
+        [dead.sum(dtype=torch.int64), owned.sum(dtype=torch.int64)]
+    ).tolist()
+    n_pruned, n_owned = int(n_pruned), int(n_owned)
+    n_pairs = n_owned * int(dead.shape[1])
+
     _MV_PRUNE["pairs"] += n_pairs
     _MV_PRUNE["pruned"] += n_pruned
-    # Feed the engage/disengage gate from the counts just materialized, so
-    # maintaining it costs no sync of its own.
-    mv_state.note_pruned(n_pruned, n_pairs)
+
+    # Aggregate across members when the caller provides a slice-level tally.
+    if tally is None:
+        mv_state.note_pruned(n_pruned, n_pairs)
+    else:
+        tally[0] += n_pruned
+        tally[1] += n_pairs
+
+    # `upper` is produced only for audit-selected slices.
+    if upper is not None:
+        _mv_audit_slice(sl, Q, metric, dead, thr_all, upper, scores)
+
     return scores
 
+def _mv_audit_slice(sl, Q, metric, dead, thr_all, upper, scores) -> None:
+    """Audit pruning decisions against the unpruned scorer.
+
+    Failure to obtain exact scores is logged and skipped because auditing is
+    optional. A detected audit violation still propagates.
+    """
+    try:
+        exact = sl.score(Q, metric)
+    except Exception as exc:  # noqa: BLE001
+        if twopass.is_oom(exc):
+            logger.warning(
+                "multivector prune audit could not allocate the exact MaxSim "
+                "for a %d x %d slice; that slice is not graded",
+                int(dead.shape[0]), int(dead.shape[1]),
+            )
+        else:
+            logger.error(
+                "multivector prune audit could not score a %d x %d slice "
+                "(%r); that slice is not graded",
+                int(dead.shape[0]), int(dead.shape[1]), exc,
+            )
+        return
+
+    try:
+        mv_fp16.audit_decisions(
+            exact, dead, thr_all, upper=upper, scores=scores
+        )
+    finally:
+        del exact
 
 # Process-wide tally of what the prune did. NOTHING READS THIS in production —
 # it exists for tests and for benchmark harnesses, which reset it themselves
 _MV_PRUNE = {"pairs": 0, "pruned": 0, "calls": 0, "declined": 0, "sec": 0.0}
 
+
+def _log_mv_prune_summary() -> None:
+    """Log end-of-run multivector prune and audit statistics."""
+    if _MV_PRUNE["calls"]:
+        pairs = max(_MV_PRUNE["pairs"], 1)
+        logger.info(
+            "mv-prune calls=%d declined=%d pruned=%.4f (%d/%d pairs)%s",
+            _MV_PRUNE["calls"], _MV_PRUNE["declined"],
+            _MV_PRUNE["pruned"] / pairs, _MV_PRUNE["pruned"],
+            _MV_PRUNE["pairs"],
+            f" prune_s={_MV_PRUNE['sec']:.1f}" if _MV_PRUNE["sec"] else "")
+
+    g = mv_fp16.gate_stats()
+    if g["closed"]:
+        total = g["closed"] + g["open"]
+        logger.info(
+            "mv-prune gate: off for %d of %d slices (%.1f%%), engaged %d "
+            "time(s), disengaged %d — lower "
+            "params.multivector_min_prune_rate if the achieved rate was "
+            "profitable",
+            g["closed"], total, 100.0 * g["closed"] / max(total, 1),
+            g["latched"], g["unlatched"])
+
+    a = mv_fp16.audit_stats()
+    if not a["graded_slices"]:
+        if a["offered"]:
+            logger.warning(
+                "mv-prune audit was requested but graded 0 of %d offered "
+                "slices; this run is NOT audited.",
+                a["offered"])
+        return
+
+    logger.info(
+        "mv-prune AUDIT slices=%d/%d offered decisions=%d bounds=%d scores=%d "
+        "| correct_prune=%d correct_live=%d wasted_live=%d "
+        "false_prune=%d bound_violations=%d score_mismatch=%d min_headroom=%s",
+        a["graded_slices"], a["offered"], a["graded_pairs"],
+        a["graded_bounds"], a["graded_scores"], a["correct_prune"],
+        a["correct_live"], a["wasted_live"], a["false_prune"],
+        a["bound_violations"], a["score_mismatch"],
+        "n/a" if a["min_headroom"] is None else f"{a['min_headroom']:.3e}")
+
+    if a["graded_slices"] < a["offered"]:
+        logger.warning(
+            "mv-prune audit graded only %d of %d offered slices; the rest "
+            "are NOT verified",
+            a["graded_slices"], a["offered"])
+
+    if a["false_prune"] or a["bound_violations"] or a["score_mismatch"]:
+        logger.error("mv-prune AUDIT FAILED: %s", a["disabled"])
 
 def _process_batch_group(
     batch, member_idxs: list[int], specs: list[SearchSpec], spec_Q, spec_q_norms,
@@ -3423,6 +3525,8 @@ def _process_batch_group(
                 tp_groups.clear()
         probe = tp_probe[0] and not tp_plan
         probe_live: dict[tuple, list] = {}
+        # One prune-rate measurement per SLICE, summed over its members.
+        mv_tally = [0, 0]
 
         for m in member_idxs:
             s = specs[m]
@@ -3457,7 +3561,7 @@ def _process_batch_group(
                 # member's running threshold), so they bypass `score_cache`.
                 scores = _mv_pruned_scores(
                     sl, spec_Q[m], s.metric, mv_prune if prune else None,
-                    spec_thr[m], spec_qsel[m],
+                    spec_thr[m], spec_qsel[m], tally=mv_tally,
                 )
             if plan is None and scores is None:
                 scores = score_cache.get(score_key)
@@ -3574,6 +3678,9 @@ def _process_batch_group(
             pending_cols[m] += part_key.shape[1]
             if pending_cols[m] >= s.k:
                 _flush_pending(m)
+
+        if mv_prune is not None and mv_tally[1]:
+            mv_prune.note_pruned(mv_tally[0], mv_tally[1])
 
         if probe and probe_live:
             # Seed profitability from the union of live score-matrix rows. Filtering
@@ -5475,12 +5582,33 @@ def run_compute(
         # bounded by the end-to-end `window` semaphore, not by `fq` alone.
         pending: dict[int, tuple] = {}
 
-        # Opt-in multivector prune. Certification and the float16 query copy
-        # are done lazily from the first corpus slice, so this only allocates
-        # state; `None` leaves every scoring path byte-for-byte as it was.
+        # Reset the process-wide prune tallies FIRST, and unconditionally
+        _MV_PRUNE.update({k: (0.0 if isinstance(v, float) else 0)
+                          for k, v in _MV_PRUNE.items()})
+        mv_fp16.reset_gate_stats()
+        mv_fp16.reset_audit_counters()
+
+        # The multivector prune is OPT-OUT: `params.multivector_prune` defaults
+        # to "fp16", and `off` is how a config declines it. Certification and
+        # the float16 query copy are done lazily from the first corpus slice,
+        # so this only allocates state; `None` leaves every scoring path
+        # byte-for-byte as it was.
         mv_prune = None
         if "multivector" in vts_needed and cfg.params.multivector_prune == "fp16":
             from nova_bf.mv_fp16 import Fp16State
+
+            # Reject a malformed NOVA_BF_MV_PRUNE_AUDIT here, at startup,
+            # rather than letting it silently mean "not audited" for a run the
+            # operator asked to have verified.
+            mv_fp16.check_audit_env()
+
+            # The audit DISABLE is deliberately not cleared: if the bound was
+            # wrong once it is wrong for the same code again.
+            if mv_fp16.audit_disabled():
+                logger.warning(
+                    "float16 multivector prune stays OFF: an earlier run in "
+                    "this process failed its audit (%s)",
+                    mv_fp16.audit_disabled())
             mv_prune = Fp16State(
                 min_prune_rate=cfg.params.multivector_min_prune_rate)
 
@@ -5770,6 +5898,8 @@ def run_compute(
         wall_mbps, stream_mbps, io_wait, gpu_secs, filter_secs,
         read_wall, filter_wall,
     )
+    _log_mv_prune_summary()
+
     split = profiling.read_split_totals()
     read_counters = profiling.read_counter_totals()
     if split:

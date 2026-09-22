@@ -26,6 +26,7 @@ pa = pytest.importorskip("pyarrow")
 import pyarrow.parquet as pq
 
 from nova_bf import compute as cm
+from nova_bf import mv_fp16
 from nova_bf.compute import run_compute
 from nova_bf.config import load_config
 
@@ -87,6 +88,11 @@ output:
 params:
   io_workers: 1
   multivector_prune: {prune}
+  # 0.0 pins the gate open. These fixtures are a handful of slices, and the
+  # gate needs three consecutive good batch-group probes to engage — on a run
+  # this short it would never latch, and every test here would pass vacuously
+  # by never reaching the prune at all.
+  multivector_min_prune_rate: 0.0
 searches:
   - name: mv
     k: {k}
@@ -260,8 +266,17 @@ searches:
     vector_type: multivector
 """)
     cm._MV_PRUNE.update(pairs=0, pruned=0, calls=0, declined=0, sec=0.0)
+    mv_fp16.reset_gate_stats()
     run_compute(load_config(str(cfg)))
-    assert cm._MV_PRUNE["calls"] > 0, "the default did not reach the prune"
+
+    # The GATE is what proves the plumbing here, not `calls`. This config
+    # deliberately sets no `multivector_min_prune_rate`, so the default 0.70
+    # floor applies, and a fixture this short never gets the three consecutive
+    # good probes needed to engage — `calls` would be 0 whether the default
+    # plumbed through or not. `closed` counts slices that REACHED the gate and
+    # were turned away, which separates "not wired" from "wired but gated".
+    assert mv_fp16.gate_stats()["closed"] > 0, (
+        "the default did not reach the prune")
 
 
 def test_the_setting_is_recorded_in_the_output_metadata(tmp_path,
@@ -319,3 +334,63 @@ def test_bare_on_in_yaml_is_still_rejected():
 
     with pytest.raises(pydantic.ValidationError):
         ParamsConfig(multivector_prune=True)
+
+
+def test_the_probe_wiring_can_actually_engage_the_gate():
+    """The seam nothing else covers: `_mv_note_unpruned_rate` measuring a
+    slice that was scored WITHOUT the prune, and the gate acting on it.
+
+    Every fixture above pins `multivector_min_prune_rate: 0.0`, which starts
+    the gate latched — so the probe path and the latch transition are never
+    exercised through a real config. `tests/test_mv_prune_gate.py` feeds
+    `Fp16State` plain integers and never touches this function. Without this
+    test, nothing verifies that a run using the SHIPPED default can ever
+    engage at all, and the probe and the floor now come from two different
+    estimators."""
+    torch = pytest.importorskip("torch")
+
+    from nova_bf.compute import _mv_note_unpruned_rate
+    from nova_bf.mv_fp16 import Fp16State
+    from nova_bf.tiebreak import pack
+
+    class _Q:
+        n_q = 4
+
+    st = Fp16State(min_prune_rate=0.70)
+    assert not st.gate_open(), "the default floor must start closed"
+
+    # 4 queries x 5 documents, thresholds above every score: all prunable.
+    scores = torch.zeros(4, 5)
+    thr = pack(torch.full((4,), 1.0), torch.zeros(4, dtype=torch.int64))
+
+    for i in range(Fp16State._LATCH_AFTER):
+        assert st.wants_probe(), "a closed gate must still want measuring"
+        assert _mv_note_unpruned_rate(st, scores, _Q(), thr, None), (
+            f"probe {i} reported nothing measurable")
+    assert st.gate_open(), "three good probes did not engage the prune"
+    assert not st.wants_probe(), "a latched gate must stop paying for probes"
+
+
+def test_the_probe_ignores_rows_the_member_does_not_own():
+    """Unowned rows carry `-inf` thresholds, and `x >= -inf` is True — so
+    counting them made an unowned row look permanently live. A member owning
+    20% of the rows measured 0.20 even with every one of ITS pairs prunable,
+    and could never clear the 0.70 floor."""
+    torch = pytest.importorskip("torch")
+
+    from nova_bf.compute import _mv_note_unpruned_rate
+    from nova_bf.mv_fp16 import Fp16State
+    from nova_bf.tiebreak import pack
+
+    class _Q:
+        n_q = 10
+
+    st = Fp16State(min_prune_rate=0.70)
+    scores = torch.zeros(10, 5)
+    thr = pack(torch.full((2,), 1.0), torch.zeros(2, dtype=torch.int64))
+
+    for _ in range(Fp16State._LATCH_AFTER):
+        assert _mv_note_unpruned_rate(st, scores, _Q(), thr, slice(0, 2))
+    assert st.gate_open(), (
+        "a member owning 2 of 10 rows could not engage despite pruning all "
+        "of its own pairs")

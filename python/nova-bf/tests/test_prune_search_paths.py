@@ -233,7 +233,16 @@ def _mv_cfg(cdir, qpath, out, k=5, budget=None):
                               id_column="qid"),
         output=OutputConfig(path=str(out)),
         params=ParamsConfig(io_workers=1, tiebreak="id",
-                            multivector_token_budget=budget),
+                            multivector_token_budget=budget,
+                            # This file pins the ROW prune's mask/tiling
+                            # association, and `_assert_same` is exact. The
+                            # float16 multivector prune is a second variable
+                            # with a deliberately different contract -- its
+                            # survivors fold in float64 for determinism, so a
+                            # pruned score can differ from an unpruned one in
+                            # the last bit. Held off here, and covered at its
+                            # own tolerance in tests/parity/test_parity_mv_prune.py.
+                            multivector_prune="off"),
         searches=[SearchSpec(name="mv", k=k, metric="dot",
                              vector_type="multivector")],
     )
