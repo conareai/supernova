@@ -538,9 +538,9 @@ def test_the_force_value_is_validated_before_any_reduce(ds, tmp_path, monkeypatc
     reads: list[str] = []
     real = m.Store.read_columns
 
-    def spy(self, read_path, columns):
+    def spy(self, read_path, columns, *args, **kwargs):
         reads.append(read_path)
-        return real(self, read_path, columns)
+        return real(self, read_path, columns, *args, **kwargs)
 
     monkeypatch.setattr(m.Store, "read_columns", spy)
     monkeypatch.setenv("NOVA_BF_MERGE_FORCE", "yepp")
@@ -724,7 +724,7 @@ def test_the_merge_window_reaches_run_merge_from_the_config(
     lock = threading.Lock()
     real = m.Store.read_columns
 
-    def counting(self, read_path, columns):
+    def counting(self, read_path, columns, *args, **kwargs):
         nonlocal live, peak
         with lock:
             live += 1

@@ -307,7 +307,7 @@ def test_slow_first_file_cannot_flood_host_memory(tmp_path, monkeypatch):
     started_during_stall: list[int] = []
     real_read = Store.read_columns
 
-    def stalling_read(self, read_path, columns):
+    def stalling_read(self, read_path, columns, *args, **kwargs):
         if str(cdir) in str(read_path):
             with lock:
                 corpus_reads_started.append(read_path)
@@ -318,7 +318,7 @@ def test_slow_first_file_cannot_flood_host_memory(tmp_path, monkeypatch):
             with lock:
                 started_during_stall.append(len(corpus_reads_started) - 1)
             return result
-        return real_read(self, read_path, columns)
+        return real_read(self, read_path, columns, *args, **kwargs)
 
     monkeypatch.setattr(Store, "read_columns", stalling_read)
     stalled = pq.read_table(run_compute(_cfg("out_stalled"))["test"]).to_pydict()

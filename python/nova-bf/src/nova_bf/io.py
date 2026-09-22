@@ -102,8 +102,32 @@ class Store:
         """
         return pq.read_schema(read_path, filesystem=self.fs)
 
-    def read_columns(self, read_path: str, columns: list[str] | None) -> pa.Table:
-        if self.ranged_get:
+    def read_columns(self, read_path: str, columns: list[str] | None,
+                     ranged: bool | None = None) -> pa.Table:
+        """`columns` of one parquet file.
+
+        `ranged` overrides the store's `ranged_get` for this one call; `None`
+        (the default) uses the store setting.
+
+        WHY THE OVERRIDE EXISTS. Both paths below project `columns`, so they
+        return the same table -- they differ only in how the bytes arrive.
+        Ranged-GET buffers the WHOLE file (`_ranged_download` allocates the
+        file's full size) and then parses the wanted columns out of it, which
+        is the right trade when the caller wants most of the file's bytes, as
+        the vector scan does. It is the wrong trade for a narrow column: the
+        `tiebreak='id'` startup pass wants one id column, ~180 KB of a ~4.3 GB
+        pubmed shard, and buying all 4.3 GB to keep 0.004% of it cost 1055 s
+        per rank and (at the default 32-way fan-out) ~137 GB of resident
+        buffers, which OOM-killed all 16 ranks of a pubmed GT run on
+        2026-09-22 before a single corpus vector was scored.
+
+        Note what the ranged branch gates on: FILE size. That answers "is this
+        file big?" when the question that decides the trade is "are we reading
+        most of it?" -- so a caller reading one narrow column has to opt out
+        here rather than rely on the size gate to do the right thing.
+        """
+        use_ranged = self.ranged_get if ranged is None else ranged
+        if use_ranged:
             size = self.fs.get_file_info(read_path).size
             if size is not None and size >= _RANGED_GET_MIN_BYTES:
                 return pq.read_table(

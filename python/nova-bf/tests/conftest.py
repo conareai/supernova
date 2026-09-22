@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import pytest
 
-_MERGE_ENV = ("NOVA_BF_MERGE_FORCE", "NOVA_BF_MERGE_WINDOW")
+_MERGE_ENV = (
+    "NOVA_BF_MERGE_FORCE", "NOVA_BF_MERGE_WINDOW",
+    # Same property as the merge overrides: both are meant to be EXPORTED to
+    # get a run through a bad day (throttle the `tiebreak='id'` startup pass,
+    # or put it back on whole-file ranged reads), so they linger in the shell
+    # afterwards. An exported NOVA_BF_ID_PASS_RANGED_GET is the quiet one --
+    # the ids come out identical either way, so every id-pass test would go on
+    # reporting green while exercising the whole-file path the change exists
+    # to avoid.
+    "NOVA_BF_ID_PASS_RANGED_GET", "NOVA_BF_ID_PASS_WORKERS",
+)
 
 
 @pytest.fixture(autouse=True)
 def _merge_env_is_hermetic(monkeypatch):
-    """No test inherits the operator's merge overrides.
+    """No test inherits the operator's run-rescue overrides.
 
     `NOVA_BF_MERGE_FORCE` is meant to be EXPORTED for a rescue run, so it will
     be set in the shell of whoever is working on this code -- exactly when

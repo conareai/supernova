@@ -105,9 +105,9 @@ def _slow_reads(monkeypatch, seconds=0.02):
     monkeypatch.delenv("NOVA_BF_READ_TIMING", raising=False)
     real_read = Store.read_columns
 
-    def slow(self, path, cols):
+    def slow(self, path, cols, *args, **kwargs):
         time.sleep(seconds)
-        return real_read(self, path, cols)
+        return real_read(self, path, cols, *args, **kwargs)
 
     monkeypatch.setattr(Store, "read_columns", slow)
     return seconds

@@ -92,6 +92,12 @@ logger = logging.getLogger(__name__)
 # How many id columns the `tiebreak="id"` startup pass fetches at once.
 ID_PASS_WORKERS = max(1, int(os.environ.get("NOVA_BF_ID_PASS_WORKERS", "32")))
 
+# Whether that pass fetches its id column with ranged-GET (whole-file download)
+# instead of parquet column projection. OFF by default.
+ID_PASS_RANGED_GET = os.environ.get(
+    "NOVA_BF_ID_PASS_RANGED_GET", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+
 PREFETCH_QUEUE_SIZE = 4
 # Limit how many top-K entries are decoded/sorted at once to bound peak GPU
 # memory during final result decoding (~384 MiB of temporary storage).
@@ -4324,7 +4330,7 @@ def _load_query_columns(
     out: dict[str, list] = {c: [] for c in cols}
     date_fmts = normalize_date_fields(qcfg.date_fields)
     for f in store.list_parquets():
-        table = store.read_columns(f.read_path, list(cols))
+        table = store.read_columns(f.read_path, list(cols), ranged=False)
         conv = convert_table_date_columns(table, date_fmts)
         for c in cols:
             out[c] += conv[c].to_pylist()
@@ -5208,7 +5214,13 @@ def run_compute(
                             if id_rank_cancel.is_set():
                                 return
                             futures.append(pool.submit(
-                                lambda f=f: cstore.read_columns(f.read_path, [id_col])[id_col]
+                                lambda f=f: cstore.read_columns(
+                                    f.read_path, [id_col],
+                                    # `None` = the store's setting; `False`
+                                    # projects the column instead of buying the
+                                    # whole file. See ID_PASS_RANGED_GET.
+                                    ranged=None if ID_PASS_RANGED_GET else False,
+                                )[id_col]
                             ))
                     # Resolve in file order, preserving the old `map`
                     # guarantee. A failed scan cancels all queued reads.

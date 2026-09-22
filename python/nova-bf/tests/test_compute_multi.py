@@ -1041,9 +1041,9 @@ def test_shared_io_and_decode_once_per_file_not_per_spec(ds, monkeypatch):
 
     orig_read = Store.read_columns
 
-    def counting_read(self, path, columns):
+    def counting_read(self, path, columns, *args, **kwargs):
         calls["read_columns"] += 1
-        return orig_read(self, path, columns)
+        return orig_read(self, path, columns, *args, **kwargs)
 
     orig_dense = compute_mod.dense_to_2d
 
