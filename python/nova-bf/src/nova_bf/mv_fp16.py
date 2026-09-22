@@ -678,99 +678,99 @@ class Fp16State:
         else:
             self._good = 0
     
-def note_pruned(self, n_pruned: int, n_pairs: int) -> None:
-    """Record the prune rate actually achieved by a pruned slice.
+    def note_pruned(self, n_pruned: int, n_pairs: int) -> None:
+        """Record the prune rate actually achieved by a pruned slice.
 
-    Disengages after repeated slices fall below the configured prune-rate floor.
-    """
-    if n_pairs <= 0 or not self._latched:
-        return
+        Disengages after repeated slices fall below the configured prune-rate floor.
+        """
+        if n_pairs <= 0 or not self._latched:
+            return
 
-    if n_pruned / n_pairs >= self.min_prune_rate:
-        self._bad = 0
-        return
+        if n_pruned / n_pairs >= self.min_prune_rate:
+            self._bad = 0
+            return
 
-    self._bad += 1
-    if self._bad >= self._UNLATCH_AFTER:
-        self._latched = False
-        self._good = 0
-        _GATE["unlatched"] += 1
-        logger.info(
-            "float16 multivector prune disengaged: %d consecutive slices "
-            "pruned less than %.0f%% of pairs, so pass one is costing more "
-            "than it saves. Set params.multivector_min_prune_rate=0.0 to "
-            "keep it on regardless.",
-            self._bad, 100.0 * self.min_prune_rate)
-
-
-def wants_probe(self) -> bool:
-    """Whether an unpruned slice should refresh the gate estimate."""
-    return not self._latched
+        self._bad += 1
+        if self._bad >= self._UNLATCH_AFTER:
+            self._latched = False
+            self._good = 0
+            _GATE["unlatched"] += 1
+            logger.info(
+                "float16 multivector prune disengaged: %d consecutive slices "
+                "pruned less than %.0f%% of pairs, so pass one is costing more "
+                "than it saves. Set params.multivector_min_prune_rate=0.0 to "
+                "keep it on regardless.",
+                self._bad, 100.0 * self.min_prune_rate)
 
 
-def gate_open(self) -> bool:
-    """Whether to run the pruning pass on this slice."""
-    if self._latched:
-        _GATE["open"] += 1
-        return True
-
-    _GATE["closed"] += 1
-    return False
+    def wants_probe(self) -> bool:
+        """Whether an unpruned slice should refresh the gate estimate."""
+        return not self._latched
 
 
-def score(self, q_flat, c_flat, q_offsets, doc_offsets, thresholds):
-    """Return `(scores, dead, upper)`, or `None` to use unpruned scoring.
+    def gate_open(self) -> bool:
+        """Whether to run the pruning pass on this slice."""
+        if self._latched:
+            _GATE["open"] += 1
+            return True
 
-    `upper` is returned only when this slice is selected for auditing.
-    """
-    if _AUDIT_DISABLED is not None:
-        return None
-    if c_flat.shape[0] == 0 or q_flat.shape[0] == 0:
-        return None
-    if not self._ensure_certified(int(c_flat.shape[1]), c_flat.device):
-        return None
+        _GATE["closed"] += 1
+        return False
 
-    ver = getattr(q_flat, "_version", None)
-    hit = next(
-        (e for e in self._q_cache if e[0] is q_flat and e[1] == ver),
-        None,
-    )
 
-    if hit is None:
-        qn = norm_upper(q_flat)
-        qh = to_half(q_flat, n_max=qn)
+    def score(self, q_flat, c_flat, q_offsets, doc_offsets, thresholds):
+        """Return `(scores, dead, upper)`, or `None` to use unpruned scoring.
 
-        if qh is None:
-            # Fall back safely if this query representation cannot use FP16.
-            if not self._warned:
-                self._warned = True
-                logger.warning(
-                    "float16 cannot represent these query tokens; scoring "
-                    "this slice without the prune"
-                )
+        `upper` is returned only when this slice is selected for auditing.
+        """
+        if _AUDIT_DISABLED is not None:
+            return None
+        if c_flat.shape[0] == 0 or q_flat.shape[0] == 0:
+            return None
+        if not self._ensure_certified(int(c_flat.shape[1]), c_flat.device):
             return None
 
-        # Publish the cache entry only after all derived state is valid.
-        hit = (q_flat, ver, qh, qn)
-        self._q_cache.append(hit)
-        del self._q_cache[:-self._Q_CACHE_MAX]
+        ver = getattr(q_flat, "_version", None)
+        hit = next(
+            (e for e in self._q_cache if e[0] is q_flat and e[1] == ver),
+            None,
+        )
 
-    return _pruned_maxsim_scores(
-        q_flat,
-        c_flat,
-        q_offsets,
-        doc_offsets,
-        thresholds,
-        q_half=hit[2],
-        q_norm_max=hit[3],
-        certified=True,
-        want_upper=_audit_should_grade(),
-    )
+        if hit is None:
+            qn = norm_upper(q_flat)
+            qh = to_half(q_flat, n_max=qn)
 
-# ---------------------------------------------------------------------------
-# Ragged helpers, the bound primitives, and the exact survivor pass. Only
-# `slack` above is float16-specific; the rest is pass-one-agnostic.
-# ---------------------------------------------------------------------------
+            if qh is None:
+                # Fall back safely if this query representation cannot use FP16.
+                if not self._warned:
+                    self._warned = True
+                    logger.warning(
+                        "float16 cannot represent these query tokens; scoring "
+                        "this slice without the prune"
+                    )
+                return None
+
+            # Publish the cache entry only after all derived state is valid.
+            hit = (q_flat, ver, qh, qn)
+            self._q_cache.append(hit)
+            del self._q_cache[:-self._Q_CACHE_MAX]
+
+        return _pruned_maxsim_scores(
+            q_flat,
+            c_flat,
+            q_offsets,
+            doc_offsets,
+            thresholds,
+            q_half=hit[2],
+            q_norm_max=hit[3],
+            certified=True,
+            want_upper=_audit_should_grade(),
+        )
+
+    # ---------------------------------------------------------------------------
+    # Ragged helpers, the bound primitives, and the exact survivor pass. Only
+    # `slack` above is float16-specific; the rest is pass-one-agnostic.
+    # ---------------------------------------------------------------------------
 
 
 def _check_partition(off_cpu, n_tokens: int, what: str) -> None:
