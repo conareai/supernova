@@ -70,7 +70,7 @@ your run uses.
 |---|---|
 | `QDRANT_URL`, `QDRANT_API_KEY` | The Qdrant cluster (`nova load`, `nova storm`, `nova sweep`) |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Reading or writing S3 |
-| `AWS_SESSION_TOKEN` | S3 with temporary credentials (see [AWS SSO](../reference/aws-sso.md)) |
+| `AWS_SESSION_TOKEN` | S3 with temporary credentials |
 | `AWS_REGION` | S3 region (defaults to `us-east-1`) |
 | `HF_TOKEN` | Private Hugging Face datasets, writing to `hf://` |
 | `OPENAI_API_KEY` | The OpenAI embedder |

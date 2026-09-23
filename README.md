@@ -92,5 +92,5 @@ pool/job YAMLs without launching. Templates live in `configs/skypilot/`.
 make docs       # serve at http://localhost:8000
 ```
 
-Start with **Getting Started → Installation / Quickstart**, then the per-tool
+Start with **Getting Started → Installation**, then the per-tool
 sections and the **Reference**.

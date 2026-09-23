@@ -6,33 +6,16 @@ site_dir = "site"
 
 nav = [
   {"Home" = "index.md"},
-  {"Getting Started" = [
-    "getting-started/installation.md",
-    "getting-started/quickstart.md",
-  ]},
-  {"Embedding" = [
-    "embedding/overview.md",
-    "embedding/dense-embedders.md",
-    "embedding/sparse-embedders.md",
-    "embedding/storage.md",
-    "embedding/throughput-prediction.md",
-  ]},
-  {"Loading" = [
-    "loading/overview.md",
-  ]},
-  {"Brute Force" = [
-    "brute-force/overview.md",
-  ]},
-  {"Storm" = [
-    "storm/recall.md",
-  ]},
-  {"Sweep" = [
-    "sweep/overview.md",
+  {"Getting Started" = "getting-started/installation.md"},
+  {"Tools" = [
+    {"Embed" = "embedding.md"},
+    {"Brute Force" = "brute-force/overview.md"},
+    {"Load" = "loading/overview.md"},
+    {"Storm" = "storm/overview.md"},
+    {"Sweep" = "sweep/overview.md"},
   ]},
   {"Distributed" = "distributed.md"},
-  {"Reference" = [
-    "reference/cli.md",
-  ]},
+  {"CLI" = "reference/cli.md"},
 ]
 
 extra_css = ["stylesheets/extra.css"]

@@ -46,7 +46,7 @@ target:
   # password: my-password
   # tls_insecure: true                # a default node serves a self-signed cert
   #   Reports per-result scores and reads its own `space_type`, so tie-aware
-  #   recall works here as it does on qdrant (see docs/storm/recall.md).
+  #   recall works here as it does on qdrant (see docs/storm/internals.md).
 
 # What to search with.
 query:
@@ -64,7 +64,7 @@ query:
   # float32 -> 5e-6, float16 -> 2e-3. A collection created without an explicit
   # datatype reports none and takes the float32 value, since that is Qdrant's
   # default storage; only an unreadable or unrecognized one gets 2e-3.
-  # See docs/storm/recall.md for the measurements behind those.
+  # See docs/storm/internals.md for the measurements behind those.
   # tie_epsilon: 2e-3
   # Return each hit's full payload (default false = ids/scores only). Turn on
   # when the modeled production traffic fetches payloads — payload reads and
@@ -123,8 +123,9 @@ load:
 
 # Optional: per-dispatch TIME-SERIES output, for plotting transient behavior
 # (acute load, the cluster re-optimizing mid-run) that the end-of-run summary
-# collapses away. One raw row per dispatch, in completion order:
-#   t_s (seconds since run start), latency_ms, ok, recalls
+# collapses away. One raw row per dispatch (in completion order only when
+# load.defer_scoring is false):
+#   t_s (seconds since run start), latency_ms, ok, recalls_full, recalls_short
 # Deliberately unaggregated — bucket/smooth downstream (pandas/polars/duckdb).
 # Omit the section for summary-only (default). `path: "-"` streams to stdout —
 # fine interactively, but it breaks `--json` consumers like `nova sweep`.
