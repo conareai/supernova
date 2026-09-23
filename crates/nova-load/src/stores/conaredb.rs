@@ -302,11 +302,19 @@ impl VectorStore for ConareDbStore {
         }
         // The engine sheds a frame with 503 `bulk_admission_deferred` while its
         // persister catches up; that is backpressure, retried here rather than
-        // surfaced (the loader's own retry budget is for real failures).
-        for attempt in 0..600u32 {
+        // surfaced (the loader's own retry budget is for real failures). The
+        // wait is bounded by one 300 s wall-clock deadline, including the
+        // requests themselves, not 600 x the per-request timeout.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        for attempt in 0u32.. {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
             let resp = self
                 .request(reqwest::Method::POST, &path)
                 .header("content-type", "application/octet-stream")
+                .timeout(left)
                 .body(frame.clone())
                 .send()
                 .await
@@ -317,7 +325,10 @@ impl VectorStore for ConareDbStore {
             }
             let text = resp.text().await.unwrap_or_default();
             if status.as_u16() == 503 && text.contains("bulk_admission_deferred") {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep_until(
+                    (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline),
+                )
+                .await;
                 if attempt % 20 == 19 {
                     tracing::info!("{self}: bulk admission deferred, still waiting");
                 }

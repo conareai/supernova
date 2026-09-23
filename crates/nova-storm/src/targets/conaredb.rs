@@ -280,11 +280,16 @@ impl Expander {
                 }
             }
         }
-        if self.copy_order == CopyOrder::Uuid {
-            raw.sort_unstable(); // byte order == lowercase hex string order
-        }
         let n = n.min(want);
-        out.extend(raw[..n].iter().map(|u| uuid_string(u)));
+        if self.copy_order == CopyOrder::Uuid && n < raw.len() {
+            // byte order == lowercase hex string order; only the first n matter
+            raw.select_nth_unstable(n);
+        }
+        let head = &mut raw[..n];
+        if self.copy_order == CopyOrder::Uuid {
+            head.sort_unstable();
+        }
+        out.extend(head.iter().map(|u| uuid_string(u)));
         Ok(n)
     }
 }
@@ -394,11 +399,17 @@ impl ConareDbTarget {
         let k = self.top_k as usize;
         let mut ids = Vec::with_capacity(k);
         let mut scores = Vec::with_capacity(k);
+        if self.expand.is_none() && hits.len() > k {
+            return Err(format!("{} hits for top_k {k}", hits.len()));
+        }
         for h in hits {
             let Some(id) = h["id"].as_str() else {
                 return Err(format!("a hit has no string `id`: {h}"));
             };
-            let score = h["score"].as_f64().unwrap_or(f64::NAN) as f32;
+            let score = match h["score"].as_f64() {
+                Some(s) if s.is_finite() => s as f32,
+                _ => return Err(format!("a hit has no finite numeric `score`: {h}")),
+            };
             match &self.expand {
                 None => {
                     ids.push(id.to_string());
@@ -580,6 +591,8 @@ mod tests {
         assert_eq!(scores, vec![0.9, 0.9, 0.9, 0.8]);
         assert_eq!(ids[0], "02000000-0000-0000-0000-0000000000ab");
         assert!(t.hits(&[json!({"id": "9", "score": 0.1})]).is_err());
+        assert!(t.hits(&[json!({"id": "3"})]).is_err());
+        assert!(t.hits(&[json!({"id": "3", "score": "0.9"})]).is_err());
     }
 
     #[test]
