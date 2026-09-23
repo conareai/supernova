@@ -86,23 +86,6 @@ To override, drop a `~/.nova/skypilot/<tool>.yaml` or pass `--resources my.yaml`
 build) and keep the default resources. Add `--dry-run` to inspect the generated
 pool/job YAMLs without launching. Templates live in `configs/skypilot/`.
 
-## Project structure
-
-```
-supernova/
-├── pyproject.toml          # the `nova` dispatcher (src/cli/)
-├── src/cli/                # git-style dispatch: nova <cmd> -> nova-<cmd>
-├── crates/                 # Rust tools
-│   ├── nova-load/          #   nova load
-│   └── nova-storm/         #   nova storm
-├── python/
-│   ├── nova-embed/         # nova embed (ML pipeline; [embed] extra)
-│   └── nova-dist/          # nova dist  (SkyPilot orchestration)
-├── configs/                # example YAML configs (+ skypilot/ resource templates)
-├── docs/                   # zensical docs site
-└── Makefile
-```
-
 ## Docs
 
 ```bash
