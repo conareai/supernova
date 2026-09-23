@@ -57,6 +57,7 @@ target:
   #   postings: /data/csr/ordinals.u64 #  positioned reads inside the measured latency
   #   uuids: /data/csr/uuids.u128     #   (a disclosed proxy; see targets/conaredb.rs)
   #   id_offset: 1                    #   served hit id = distinct row + 1
+  #   copy_order: uuid                #   copies in ascending id (nova-bf's tie order); default posting
   #   A batch of N queries is N concurrent `/v2/search` requests (the engine has
   #   no multi-query endpoint); the batch latency is the fan-out's wall. The
   #   server owns every ANN budget, so `search_params` is rejected. Reports

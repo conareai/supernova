@@ -29,6 +29,11 @@
 //!   the `uuids` table; without it, the postings are the 16-byte ids themselves.
 //! * `uuids` (optional): 16 raw bytes per ordinal, rendered as a lowercase
 //!   8-4-4-4-12 uuid (the FineWeb `id` column's bytes, as in `ids.npy`).
+//!
+//! `copy_order` picks which copies of a duplicate group fill the last slots:
+//! `posting` (default) = posting-list order; `uuid` = ascending id, the order
+//! nova-bf's ground truth uses inside an exact-score tie (the whole posting
+//! list is read and sorted, so a large group costs one larger read).
 
 use std::fmt;
 use std::fs::File;
@@ -75,6 +80,17 @@ pub struct ExpandConfig {
     /// Served hit id minus this = distinct row (`ids: "rows"` imports use 1).
     #[serde(default = "default_id_offset")]
     pub id_offset: u64,
+    #[serde(default)]
+    pub copy_order: CopyOrder,
+}
+
+/// Which copies of a duplicate group are emitted first (see module docs).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyOrder {
+    #[default]
+    Posting,
+    Uuid,
 }
 
 fn default_timeout_s() -> u64 {
@@ -110,6 +126,7 @@ struct Expander {
     postings_len: u64,
     uuids: Option<(File, u64)>,
     id_offset: u64,
+    copy_order: CopyOrder,
 }
 
 fn open(path: &str) -> Result<(File, u64), TargetError> {
@@ -189,6 +206,7 @@ impl Expander {
             postings_len: plen / entry,
             uuids: uuids.map(|(f, l)| (f, l / 16)),
             id_offset: c.id_offset,
+            copy_order: c.copy_order,
         };
         // The last offset must close the postings file exactly (a partial CSR is
         // allowed only if it says so by being internally consistent).
@@ -233,15 +251,20 @@ impl Expander {
                 "expand: row {row} has an empty or out-of-range posting list [{start}, {end})"
             ));
         }
-        let n = ((end - start) as usize).min(want);
+        let len = (end - start) as usize;
+        let n = match self.copy_order {
+            CopyOrder::Posting => len.min(want),
+            CopyOrder::Uuid => len,
+        };
         let w = self.postings_bytes;
         let mut buf = vec![0u8; n * w];
         self.postings
             .read_exact_at(&mut buf, start * w as u64)
             .map_err(|e| format!("expand: postings read at {start}: {e}"))?;
+        let mut raw: Vec<[u8; 16]> = Vec::with_capacity(n);
         for chunk in buf.chunks_exact(w) {
             match &self.uuids {
-                None => out.push(uuid_string(chunk)),
+                None => raw.push(chunk.try_into().expect("16-byte posting")),
                 Some((table, len)) => {
                     let ord = le_uint(chunk);
                     if ord >= *len {
@@ -253,10 +276,15 @@ impl Expander {
                     table
                         .read_exact_at(&mut u, ord * 16)
                         .map_err(|e| format!("expand: uuid read at ordinal {ord}: {e}"))?;
-                    out.push(uuid_string(&u));
+                    raw.push(u);
                 }
             }
         }
+        if self.copy_order == CopyOrder::Uuid {
+            raw.sort_unstable(); // byte order == lowercase hex string order
+        }
+        let n = n.min(want);
+        out.extend(raw[..n].iter().map(|u| uuid_string(u)));
         Ok(n)
     }
 }
@@ -525,6 +553,7 @@ mod tests {
             postings_bytes: 8,
             uuids: Some(write(dir.path(), "u", &table)),
             id_offset: 1,
+            copy_order: CopyOrder::Posting,
         };
         let x = Expander::new(&cfg).unwrap();
         let t = ConareDbTarget {
@@ -558,19 +587,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let offs: Vec<u8> = [0u32, 1, 2].iter().flat_map(|x| x.to_le_bytes()).collect();
         let posts: Vec<u8> = [uuid(7), uuid(8)].concat();
-        let mut cfg = ExpandConfig {
+        let cfg = ExpandConfig {
             offsets: write(dir.path(), "o", &offs),
             offsets_bytes: 4,
             postings: write(dir.path(), "p", &posts),
             postings_bytes: 8,
             uuids: None,
             id_offset: 1,
+            copy_order: CopyOrder::Posting,
         };
         let x = Expander::new(&cfg).unwrap();
         let mut out = Vec::new();
         assert_eq!(x.ids(1, 10, &mut out).unwrap(), 1);
         assert_eq!(out, vec![uuid_string(&uuid(8))]);
+        // uuid order: a group's copies come out ascending, cut to `want`
+        let offs3: Vec<u8> = [0u32, 3].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let posts3: Vec<u8> = [uuid(9), uuid(3), uuid(5)].concat();
+        let sorted = ExpandConfig {
+            offsets: write(dir.path(), "o3", &offs3),
+            postings: write(dir.path(), "p3", &posts3),
+            copy_order: CopyOrder::Uuid,
+            ..cfg
+        };
+        let x = Expander::new(&sorted).unwrap();
+        let mut out = Vec::new();
+        assert_eq!(x.ids(0, 2, &mut out).unwrap(), 2);
+        assert_eq!(out, vec![uuid_string(&uuid(3)), uuid_string(&uuid(5))]);
         // offsets that do not close the postings file are refused at startup
+        let mut cfg = sorted;
+        cfg.offsets = write(dir.path(), "o", &offs);
         cfg.postings = write(dir.path(), "p2", &uuid(7));
         assert!(Expander::new(&cfg).is_err());
     }
