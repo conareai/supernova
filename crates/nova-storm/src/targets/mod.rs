@@ -26,6 +26,8 @@ pub mod milvus;
 #[cfg(feature = "opensearch")]
 pub mod opensearch;
 pub mod qdrant;
+#[cfg(feature = "conaredb")]
+pub mod conaredb;
 
 /// Outcome of a single batch dispatch (one `query_batch` round-trip, covering
 /// `vectors.len()` queries). A failure is recorded here (`ok = false`) rather
@@ -132,6 +134,8 @@ pub enum TargetConfig {
     OpenSearch(Box<opensearch::OpenSearchConfig>),
     #[cfg(feature = "milvus")]
     Milvus(milvus::MilvusConfig),
+    #[cfg(feature = "conaredb")]
+    Conaredb(conaredb::ConareDbConfig),
 }
 
 impl TargetConfig {
@@ -152,6 +156,8 @@ impl TargetConfig {
             TargetConfig::OpenSearch(c) => Ok(Arc::new(c.into_target(query).await?)),
             #[cfg(feature = "milvus")]
             TargetConfig::Milvus(c) => Ok(Arc::new(c.into_target(query).await?)),
+            #[cfg(feature = "conaredb")]
+            TargetConfig::Conaredb(c) => Ok(Arc::new(c.into_target(query).await?)),
         }
     }
 }
