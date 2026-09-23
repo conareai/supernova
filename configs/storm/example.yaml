@@ -48,15 +48,19 @@ target:
   #   Reports per-result scores and reads its own `space_type`, so tie-aware
   #   recall works here as it does on qdrant (see docs/storm/internals.md).
   #
-  # type: conaredb
-  # url: http://10.0.0.4:8080         # an engine, or the shard router in front of several
+  # type: conaredb                    # ConareDB v2 server (POST /v2/search)
+  # url: http://10.0.0.14:19305
   # api_key: ${CONAREDB_AUTH_TOKEN}
-  # namespace: fineweb_1b             # "" = the engine's root store (/v1/search)
   # timeout_s: 300
-  #   A batch of N queries is N concurrent `/search` requests (the engine has
-  #   no multi-query endpoint); the batch latency is the fan-out's wall.
-  #   Reports per-hit cosine scores, so tie-aware recall works. `search_params`
-  #   shape: { nprobe: 400, oversample: 32, rescore: 2400 }.
+  # expand:                           # only for a collapsed (deduplicated) corpus:
+  #   offsets: /data/csr/offsets.u64  #   distinct row -> corpus ids, a CSR read with
+  #   postings: /data/csr/ordinals.u64 #  positioned reads inside the measured latency
+  #   uuids: /data/csr/uuids.u128     #   (a disclosed proxy; see targets/conaredb.rs)
+  #   id_offset: 1                    #   served hit id = distinct row + 1
+  #   A batch of N queries is N concurrent `/v2/search` requests (the engine has
+  #   no multi-query endpoint); the batch latency is the fan-out's wall. The
+  #   server owns every ANN budget, so `search_params` is rejected. Reports
+  #   per-hit cosine scores (fp16 storage), so tie-aware recall works.
 
 # What to search with.
 query:
