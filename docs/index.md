@@ -3,28 +3,27 @@
 `supernova` is a toolkit for building large-scale vector search benchmarks. It does five things:
 
 1. **Embedding generation** — take a dataset, embed it with any model (dense, sparse, or multivector), and produce parquet files.
-2. **Vector store loading** — take pre-embedded parquet files and load them into a vector database
-3. **Ground truth computation** — perform brute-force, exact, nearest neighbour search over a corpus, to measure recall@k for a given index/search configuration
-4. **Load testing** — fire a query load at a vector store to measure its latency and recall
+2. **Ground truth computation** — perform brute-force, exact, nearest neighbour search over a corpus.
+3. **Vector store loading** — take pre-embedded parquet files and load them into a vector database.
+4. **Query testing** — fire a query load at a vector store to measure its latency and recall.
 5. **Parameter sweeping** — orchestrate loading + load testing across a matrix of index/search configs, in one combined report
 
-Each is its own, self-contained tool, and each shards itself for massive parallelization via `--num-jobs` / `--job-rank`. The datasets we work with are often hundreds of millions of rows and hundreds of gigabytes.
-
+Each is its own, self-contained tool, and each tool partitions work to allow parallelization via `--num-jobs` / `--job-rank`.
 ## Mental model
 
 The pipelines are independent and meant to be reproducible. Each tool doesn't know that the others exist. You can run them separately, on different machines, and at different times. The intermediate parquet files connect each step.
 
 ## One CLI, many tools
 
-`nova` is a **git-style dispatcher**: `nova <cmd>` finds an executable named `nova-<cmd>` on your `PATH` and execs it. A command can be implemented in any language — a Rust binary (`nova-load`, `nova-storm`) or a Python console script (`nova-embed`) look identical from the outside. You install the dispatcher once and add only the sub-tools you need.
+`nova` is a **cli-style dispatcher**: `nova <cmd>` finds an executable named `nova-<cmd>` on your `PATH` and execs it. A command can be implemented in any language — a Rust binary (`nova-load`, `nova-storm`) or a Python console script (`nova-embed`) look identical from the outside. You install the dispatcher once and add only the sub-tools you need.
 
 `nova --help` lists every `nova-*` tool found on your `PATH`.
 
 | Command | Purpose | Language |
 |---------|---------|----------|
 | `nova embed` | Embed a dataset into parquet | Python |
-| `nova load`  | Load pre-embedded parquet into a vector store | Rust |
 | `nova bf`    | Brute-force exact k-NN ground truth (GPU) | Python |
+| `nova load`  | Load pre-embedded parquet into a vector store | Rust |
 | `nova storm` | Load-test a vector store | Rust |
 | `nova sweep` | Sweep index/search configs across `nova load` + `nova storm` | Python |
 
