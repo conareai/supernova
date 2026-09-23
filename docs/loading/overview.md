@@ -1,14 +1,22 @@
-# Loading Overview
 
-supernova's loading pipeline streams pre-embedded parquet files from S3 or HuggingFace into vector stores like Qdrant. An embedding run typically produces many parquet files (one per chunk/slice) under a shared S3 prefix -- the loader reads all of them. It uses DuckDB for efficient remote parquet reads and async concurrency for parallel upserts.
+
+# Load
+
+`nova load` reads pre-embedded Parquet files from S3 or local disk and loads them into a vector store. Qdrant is built in; Elasticsearch, OpenSearch, and Milvus are optional.
 
 ![Loading Pipeline](../fig/ingestion_pipelione.svg)
 
-## Configuration
-
-Loader configs live in `configs/loader/`. The same file drives a single-machine run (`nova load run`) and a distributed fleet (`nova load prepare` / `load --num-jobs N --job-rank R` / `finalize`). See the [CLI reference](../reference/cli.md#nova-load) for the lifecycle.
+## Config
 
 ```yaml
+datasource:
+  type: s3
+  path: s3://my-bucket/dataset/model
+  id_expression: "vf_point_id(filename, file_row_number)"
+  payload_fields:
+    text: text
+    source: source
+
 vectors:
   dense:
     type: dense
@@ -17,388 +25,204 @@ vectors:
   sparse:
     type: sparse
     column: sparse_embedding
-  colbert:
-    type: multivector
-    column: multivector_embedding
-    distance: cosine
-    comparator: max_sim
-
-datasource:
-  type: s3                          # s3 or huggingface
-  path: s3://my-bucket/dataset/model
-  id_expression: "vf_point_id(filename, file_row_number)"   # see below
-  payload_fields:                   # what ends up in the vector store payload
-    text: text                      # payload key: parquet column name
-    source: source
 
 vectorstore:
   type: qdrant
-  collection_name: my-collection
-  url: ${QDRANT_URL}                # env var substitution with ${VAR}
+  url: ${QDRANT_URL}
   api_key: ${QDRANT_API_KEY}
-  # params:                         # collection-wide HNSW/quantization/optimizers — see below
+  collection_name: my-collection
 
 loader:
-  batch_size: 1000                  # points per upsert call
-  concurrency: 8                    # in-flight upsert batches
-  file_look_ahead: 2                # files downloaded + read ahead of the uploader
-  file_retries: 3                   # per-file download+read retries before skipping the file
-  upsert_retries: 3                 # per-batch upsert retries before aborting
-  # max_failed_files: 50            # abort if more than N files are skipped (default: unlimited)
-  # max_points_per_sec: 5000        # per-worker upsert ceiling — see "Backpressure" below
+  batch_size: 256
+  concurrency: 8
 ```
+
+Environment variables support `${VAR}` and `${VAR:-default}` expansion.
 
 ## Running
 
-```bash
-nova load configs/loader/my_dataset.yaml
-```
-
-## Resuming an interrupted load (`--continue`)
-
-When a worker dies mid-load (spot preemption, the store buckling under load,
-an operator Ctrl-C), rerun the **same** command with `--continue`:
+Single machine:
 
 ```bash
-nova load load my.yaml --num-jobs 32 --job-rank 17 --continue
+nova load run my.yaml
 ```
 
-The worker finds where its previous run stopped and picks up from there,
-instead of re-upserting its whole slice. No checkpoint files, no coordination
-— the resume point is derived from the store itself:
+Distributed:
 
-1. Within a worker, files complete **strictly in order** (batches of file
-   *N+1* never start before file *N* finishes), so the loaded files form a
-   prefix of the slice.
-2. The worker binary-searches its slice (~log2(files) probes), asking for each
-   probed file: *does this file's first point id exist in the collection?*
-3. It resumes **at** the last loaded-looking file — inclusive, because the
-   file in flight at the moment of death can be partially loaded (batches
-   within a file land out of order). Re-upserting it is idempotent: at most
-   one file of redundant work, and no gaps.
+```bash
+nova load prepare my.yaml
+nova load load my.yaml --num-jobs 32 --job-rank $RANK
+nova load finalize my.yaml
+```
 
-Probe cost depends on the `id_expression`. Expressions over only `filename` /
-`file_row_number` — the default `vf_point_id(...)` — are evaluated with **no
-file access at all**: a resume is just a handful of point lookups,
-milliseconds. Expressions referencing data columns (e.g. fineweb's
-`substr(id, 11, 36)`) download one file per probe and read a single row —
-~log2(slice) downloads, typically a couple of minutes.
+Workers independently process subsets of the input files. `nova dist load` can provision and launch the workers automatically.
 
-Properties worth knowing:
+Other commands:
 
-- **Safe to pass unconditionally.** A fresh collection probes all-miss and
-  loads from scratch; a finished worker probes all-hit and redoes only its
-  final file. So after a partial fleet failure, just relaunch **all** ranks
-  with `--continue` — no need to work out which ones died.
-- **Pairs with SkyPilot self-healing.** Put `--continue` in the task's `run:`
-  permanently and set `job_recovery: {max_restarts_on_errors: N}` — a worker
-  killed by cluster overload restarts and resumes itself.
-- **Requires** the same corpus (unchanged prefix) and the same `--num-jobs`
-  as the interrupted run — the stride must mean the same thing — and a
-  **deterministic** `id_expression` (a `random()`-based id can never match,
-  so `--continue` degrades to a full reload).
-- Upserts are idempotent overwrites, so `--continue` is a *time* optimization
-  — when in doubt, rerunning without it is always correct, just slower.
-- Files the original run **skipped** (after exhausting `file_retries`) stay
-  skipped, exactly as the original run warned. Resume never un-skips or
-  newly-skips anything.
-- Qdrant-only for now; the other backends return a clear error.
+```bash
+nova load inspect my.yaml   # dry run
+nova load reindex my.yaml   # rebuild with new index settings
+nova load delete my.yaml    # delete the collection
+```
+
+### Resuming
+
+Use `--continue` to resume an interrupted load:
+
+```bash
+nova load load my.yaml --num-jobs 32 --job-rank $RANK --continue
+```
+
+Resuming requires the same files, worker count, and a deterministic `id_expression`.
 
 ## Datasources
 
-### S3
-
-Streams parquet files via DuckDB's httpfs extension. No local download.
+S3:
 
 ```yaml
 datasource:
   type: s3
-  path: s3://my-bucket/stanford-oval--ccnews/baai_bge_large_en_v1.5
+  path: s3://my-bucket/dataset/model
 ```
 
-Reads all parquet files matching `{path}/**/*.parquet`.
-
-### HuggingFace
-
-Streams directly from HuggingFace Hub via DuckDB's `hf://` protocol.
+Local:
 
 ```yaml
 datasource:
-  type: huggingface
-  repo_id: CohereLabs/wikipedia-2023-11-embed-multilingual-v3
-  subdir: en
+  type: local
+  path: /data/dataset/model
 ```
 
-## Point IDs (`id_expression`)
+`file_list` may be used to restrict either source to specific files.
 
-`id_expression` is a **DuckDB SQL expression** the loader evaluates per row to produce the Qdrant point ID. The default (`row_id`) is just a bare column name and works if your parquets carry a pre-baked `row_id` column. The recommended form for supernova-produced corpora is the built-in macro:
+## Point IDs
+
+`id_expression` is a DuckDB expression evaluated for each row. The default `uuid()` generates new IDs on every load.
+
+For stable IDs compatible with `nova bf` ground truth:
 
 ```yaml
 datasource:
   id_expression: "vf_point_id(filename, file_row_number)"
 ```
 
-The macro hashes `(parquet path, physical row index)` into a deterministic UUID, so recall ground truth from the eval pipeline lines up with the loaded point IDs.
+An existing ID column or other DuckDB expression may also be used.
 
-`file_row_number` is critical here: it's a DuckDB virtual column that always reflects the physical row index, regardless of parallel scan order. Do **not** use `ROW_NUMBER() OVER (PARTITION BY filename)` — that reflects DuckDB's scan ordering and produces different IDs from one run to the next under concurrency. There's a regression test for this in `tests/test_loader_id_expression.py`.
+## Payload
 
-The base reader auto-enables `read_parquet(..., filename=true, file_row_number=true)` whenever your `id_expression` mentions either column, so you don't have to wire that yourself.
-
-## Vectors
-
-The top-level `vectors:` block declares one or more named vectors. Each key becomes the vector name in Qdrant; each entry needs `type` (`dense`, `sparse`, or `multivector`) and `column` (the parquet column).
-
-| Type | Distance | Other |
-|------|----------|-------|
-| `dense` | `cosine` (default), `dot`, `euclid`, `manhattan` | -- |
-| `sparse` | -- | -- |
-| `multivector` | same as dense | `comparator: max_sim` (default) |
-
-A collection with multiple named vectors lets you do hybrid retrieval (e.g. dense + sparse + late-interaction multivector).
-
-## Collection-wide params
-
-Everything under `vectorstore.params` is optional collection-wide config — as
-opposed to the per-vector `distance`/`datatype`/`on_disk` knobs in `vectors:`
-above. Qdrant's own defaults apply to anything left unset.
-
-```yaml
-vectorstore:
-  type: qdrant
-  collection_name: my-collection
-  url: ${QDRANT_URL}
-  params:
-    shard_number: 6
-    replication_factor: 2
-    write_consistency_factor: 1
-    on_disk_payload: true
-    recreate: false            # drop + recreate if an existing collection's structural params conflict
-    hnsw:
-      m: 16
-      ef_construct: 100
-      full_scan_threshold: 10000
-      max_indexing_threads: 4
-      on_disk: true
-      payload_m: 8
-    quantization:
-      type: scalar             # scalar (default), product, binary, turbo, none
-      quantile: 0.99
-      always_ram: true
-    optimizers:
-      default_segment_number: 4
-      max_segment_size_kb: 200000   # `_kb` alias for max_segment_size (both accepted)
-      memmap_threshold: 50000
-      indexing_threshold: 20000
-      flush_interval_sec: 5
-```
-
-- `recreate: true` drops and recreates the collection if it already exists with
-  conflicting structural params (shard count, per-vector size/distance, etc.).
-  It's consumed by the loader itself, not part of the request sent to Qdrant.
-  Default `false`: an existing collection is left as-is (its schema isn't
-  diffed against your config).
-- `hnsw` / `optimizers` map straight onto Qdrant's `HnswConfigDiff` /
-  `OptimizersConfigDiff` — every field is optional and independently overrides
-  just that one server default.
-- `quantization` picks **one** collection-wide method via `type:`:
-
-| `type` | Extra fields | Notes |
-|--------|--------------|-------|
-| `scalar` (default) | `quantile`, `always_ram` | int8 scalar quantization. A bare `quantization: {}` block means this. |
-| `product` | `compression` (`x4`/`x8`/`x16`/`x32`/`x64`, default `x16`), `always_ram` | Smaller index the higher the ratio, at the cost of recall. |
-| `binary` | `encoding` (`one_bit` default, `two_bits`, `one_and_half_bits`), `always_ram` | Most aggressive compression; `two_bits`/`one_and_half_bits` trade some of it back for accuracy. |
-| `turbo` | `bits` (`1`, `1.5`, `2`, `4`), `always_ram` | Qdrant's bit-packed quantization method. |
-| `none` | -- | No quantization. A no-op at creation (same as omitting `quantization:` entirely) — see [Reindexing an existing collection](#reindexing-an-existing-collection) for what it does on `reindex`. |
-
-## Custom sharding (Qdrant)
-
-`vectorstore.custom_sharding` creates the collection with Qdrant's
-[user-defined sharding](https://qdrant.tech/documentation/guides/distributed_deployment/#user-defined-sharding)
-and routes every point to a shard key computed **per row** by a DuckDB
-expression — the same expression machinery as `payload_fields`, so the
-expression sees the source columns, the injected `filename`, the
-`file_row_number` pseudo-column, and the registered macros.
-
-```yaml
-vectorstore:
-  type: qdrant
-  collection_name: my-collection
-  url: ${QDRANT_URL}
-  custom_sharding:
-    shard_key: "org_id"                          # a plain column…
-    # shard_key: "strftime(created_at, '%Y-%m')" # …or time buckets
-    # shard_key: "hash(user_id) % 16"            # …or a bounded hash
-    # shard_key: "file_row_number % 100"         # …or perfectly balanced slices
-    shards_number: 2         # optional: physical shards created per key
-    replication_factor: 2    # optional: replicas per shard, per key
-    pre_create: [acme, globex]  # optional: keys to create at prepare time
-```
-
-- **Key types.** A key is a string (`keyword`) or a non-negative integer
-  (`number`). Anything else — `NULL`, floats, dates, negative ints — is a hard
-  read error with a cast hint (e.g. `(expr)::VARCHAR`), never a silent
-  stringification: a shard key is routing.
-- **Keys are created lazily.** The distinct key set is *never* computed from
-  the data (no `DISTINCT` scan — `prepare` never reads the corpus). Each
-  worker creates a key the first time it upserts under it; racing workers are
-  fine (the loser re-checks and moves on). `pre_create` is an explicit list
-  for when you know the keys up front — it just creates them during
-  `prepare`/`run` instead of mid-load.
-- **`shard_number` changes meaning.** With custom sharding,
-  `params.shard_number` (and `custom_sharding.shards_number`, which overrides
-  it per key) means shards **per shard key**. Total physical shards = keys ×
-  shards_number × replication_factor — keep the per-key count small for
-  high-cardinality keys.
-- **The expression must be deterministic.** Qdrant does not dedupe point ids
-  *across* shard keys: re-loading with an expression that maps an id to a
-  different key (e.g. anything `random()`-based) leaves duplicate points in
-  the collection. Make the key a pure function of the row.
-- **Batching.** An upsert request carries exactly one shard key, so each
-  file's points are grouped by key before batching. A high-cardinality key
-  interleaved *within* files fragments batches (the loader warns when this
-  bites); files partitioned or sorted by the key batch perfectly.
-- **Existing collections.** If the collection already exists (`recreate:
-  false`), the loader verifies it was actually created with custom sharding
-  and fails fast otherwise.
-
-Custom sharding is Qdrant-only: on other backends the `custom_sharding` key
-is rejected at config parse time.
-
-## Reindexing an existing collection
-
-`nova load reindex <config>` patches `hnsw`/`quantization`/`optimizers` on a
-collection that **already has data loaded**, without touching the data itself
-— useful for comparing index or quantization variants without re-loading the
-whole corpus each time. It waits for the collection to finish rebuilding
-before returning (polls until Qdrant reports the collection `green` and holds
-there, and fails fast if Qdrant's optimizer itself reports an error).
-
-Two things are specific to `reindex`, as opposed to `run`/`prepare` which
-create the collection:
-
-- Structural params (`shard_number`, `replication_factor`, per-vector
-  `distance`/`datatype`/`size`) aren't patchable on an existing collection and
-  are ignored by `reindex` — only `hnsw`/`quantization`/`optimizers` apply.
-- `quantization: { type: none }` is how you explicitly **clear** quantization
-  off a collection that already has it. This is different from omitting the
-  `quantization:` block entirely: omitting it leaves whatever's currently
-  configured untouched, while `type: none` actively turns it off.
-
-`nova load delete <config>` drops the collection outright (a no-op if it
-doesn't exist already) — handy between `reindex` sweeps if you'd rather start
-from a clean collection.
-
-## Payload composition
-
-`payload_fields` controls what data gets stored alongside each vector:
+`payload_fields` maps stored payload names to DuckDB expressions:
 
 ```yaml
 payload_fields:
-  text: text              # store parquet "text" column as "text" in payload
-  abstract: text          # ...or rename it to "abstract"
-  source: source
-  url: url
+  text: text
+  title_upper: upper(title)
 ```
 
-JSON-string columns that parse to a dict are automatically unpacked into the payload.
+String, integer, float, and boolean values are supported directly. Cast other types when needed.
 
-## How it works
+## Vectors
 
-1. **Files are prefetched** -- up to `file_look_ahead` files are downloaded + DuckDB-read ahead while the current file's batches upload, so the store connection never stalls on S3/parse time
-2. **Each file's points are sliced** into `batch_size` upsert batches
-3. **Async upserts** run concurrently, controlled by a semaphore (`concurrency`); each batch is retried up to `upsert_retries` times on transient store errors
-4. **Deferred indexing** -- HNSW construction is disabled during load, then built in one pass
-5. **Per-file resilience** -- each file's download + read is retried (`file_retries`, default 3) with exponential backoff; a file that still fails is logged and **skipped** so one bad object can't abort the whole load. `max_failed_files` caps how many skips are tolerated before aborting.
+Each entry under `vectors` defines a named vector.
 
-## Indexing time in the logs
+| Key | Description |
+|---|---|
+| `type` | `dense`, `sparse`, or `multivector` |
+| `column` | Parquet column |
+| `distance` | `cosine`, `dot`, `euclid`, or `manhattan` |
+| `size` | Vector dimension; inferred if omitted |
+| `datatype` | `float32`, `float16`, or `uint8` |
+| `on_disk` | Store vectors on disk |
+| `comparator` | Multivector comparator; default `max_sim` |
+| `modifier` | Sparse modifier: `none` or `idf` |
 
-After the upload each backend logs `indexing finished: index_seconds=…` (and `reindex`
-logs `reindex timing: index_seconds=…`). **These numbers are not directly comparable
-across backends** — each vector store accounts for indexing time differently, so treat
-`index_seconds` as a within-backend signal (e.g. comparing index/quantization variants
-on the same store via `reindex`), not an apples-to-apples cross-system benchmark:
+## Qdrant Settings
 
-- **Qdrant / Milvus / OpenSearch** — `index_seconds` is a distinct *post-upload* index
-  build, timed directly (Qdrant defers HNSW during load then builds it in one pass;
-  Milvus builds the index after inserting; OpenSearch suppresses ANN structure building
-  with `index.knn.advanced.approximate_threshold: -1` during the load, then force-merges
-  to build them, which is what the post-load window measures). Milvus additionally logs a
-  separate `load_seconds` for pulling the built index into memory — a step the others have
-  no equivalent of.
-- **Elasticsearch** — builds the HNSW graph *inline during ingestion*, so there is no
-  separate build phase to time. `index_seconds` there is Elasticsearch's own `index_time`
-  stat (a fused ingest+build figure); the parenthetical `merge-settle` is only how long
-  the post-load wait for background merges took (usually ~0). The ingestion cost itself
-  shows up in the loader's throughput lines (`… pts/s`).
-
-Note the OpenSearch / Elasticsearch split above is a real behavioural difference, not a
-naming one: OpenSearch exposes a dynamic setting that suppresses vector-structure building
-per segment, so the build can be deferred and timed the way Qdrant's is. Elasticsearch has
-no equivalent knob, so its graph cost is unavoidably fused into ingestion. Two otherwise
-similar Lucene-based stores therefore report `index_seconds` that mean different things.
-
-## Backpressure: timeouts, retries, and rate limiting
-
-A cluster under heavy ingest slows its acks, and a loader that reacts badly
-makes it worse. Three knobs, in the order to reach for them:
-
-**1. `vectorstore.timeout_s` (default 120) / `connect_timeout_s` (default 10).**
-The per-request timeout. qdrant-client's own default is *five seconds*, which
-is a trap for bulk upserts: when the client gives up, the server most likely
-still applies the write, and the loader's retry re-sends the same points —
-duplicate work for a cluster that was already too slow, plus inflated
-segment-level point counts until the optimizers vacuum them. A patient timeout
-turns "timed out, retried, died" into "waited, succeeded".
+Connection settings are configured under `vectorstore`:
 
 ```yaml
 vectorstore:
-  timeout_s: 300          # seconds per upsert request
-  connect_timeout_s: 10
+  type: qdrant
+  url: http://localhost:6334
+  collection_name: my-collection
 ```
 
-**2. `loader.upsert_retries` (default 5).** Exponential backoff (250ms → 30s
-cap) between attempts, then the worker aborts — a persistent failure usually
-means the store is down or misconfigured. Non-retryable errors (bad request,
-auth, unknown collection) now abort immediately instead of burning the budget.
-
-**3. `loader.max_points_per_sec`.** A hard ceiling on this worker's upsert
-rate — an upper bound, not a target. A token bucket holding one second of the
-rate (or one batch, whichever is larger) gates every upsert *attempt*,
-retries included, so the store never sees more than the configured rate from
-this process over any sustained window.
+Collection and index settings go under `vectorstore.params`:
 
 ```yaml
-loader:
-  max_points_per_sec: 5000
+vectorstore:
+  params:
+    shard_number: 6
+    replication_factor: 2
+    on_disk_payload: true
+
+    hnsw:
+      m: 16
+      ef_construct: 100
+      on_disk: true
+
+    quantization:
+      type: scalar
+      quantile: 0.99
+
+    optimizers:
+      indexing_threshold: 20000
 ```
 
-It is **per worker**, like every other `loader:` knob: the config describes
-this process, and the fleet is an orchestration concern layered on top. A
-fleet of 32 workers at `5000` presents 160,000 pts/s to the cluster — the
-startup log and `nova load inspect` print exactly that fleet-wide figure so
-neither mental model gets surprised:
+Unset values use Qdrant defaults.
 
+Supported quantization types are `scalar`, `product`, `binary`, `turbo`, and `none`.
+
+### Reindexing
+
+`nova load reindex` updates HNSW, quantization, and optimizer settings on an existing collection without reloading the data.
+
+```bash
+nova load reindex my.yaml
 ```
-rate limit: 5000 pts/s per worker (× 32 workers = 160000 pts/s fleet-wide)
+
+## Custom Sharding
+
+`custom_sharding` routes points using a DuckDB expression:
+
+```yaml
+vectorstore:
+  custom_sharding:
+    shard_key: "org_id"
+    shards_number: 2
+    replication_factor: 2
 ```
 
-The three compose: `concurrency` caps in-flight requests, `upsert_wait: true`
-couples each request to server-side completion (natural latency backpressure),
-and `max_points_per_sec` caps throughput independent of both. If the cluster's
-sustainable rate is unknown, start with the observed rate at which timeouts
-began and back off from there — an adaptive controller (slow down on
-timeouts, creep back up when clean) is a natural follow-up on top of this.
+Shard keys must be strings or non-negative integers, and the expression should be deterministic.
 
-## Tuning
+## Other Backends
 
-| Parameter | Default | Guidance |
-|-----------|---------|----------|
-| `batch_size` | 256 | Points per upsert call. Larger = fewer calls; 256–1000 is typical for 768-1024 dim vectors. |
-| `concurrency` | CPUs − 1 | In-flight upsert batches. Lower if the store times out. |
-| `file_look_ahead` | 2 | Files downloaded + read ahead of the uploader. Higher = more overlap, more RAM/disk. |
-| `file_retries` | 5 | Per-file download+read retries (exponential backoff) before the file is skipped. |
-| `upsert_retries` | 5 | Per-batch upsert retries (exponential backoff) before the run aborts. Non-retryable errors abort immediately. |
-| `max_failed_files` | _(none)_ | Abort once more than this many files are skipped. Unset = skip every failing file and finish. |
-| `max_points_per_sec` | _(unlimited)_ | Per-worker upsert ceiling (token bucket). See [Backpressure](#backpressure-timeouts-retries-and-rate-limiting). |
-| `vectorstore.timeout_s` | 120 | Per-request timeout (seconds). Raise under sustained backpressure; the client's own 5s default is far too short. |
-| `vectorstore.connect_timeout_s` | 10 | Connection-establishment timeout (seconds). |
+Optional backends support dense vectors:
+
+- `opensearch`
+- `elastic`
+- `milvus`
+
+Build support with:
+
+```bash
+make load LOAD_FEATURES=elastic,opensearch,milvus
+```
+
+Backend-specific connection and index settings are configured under `vectorstore`.
+
+## Tuning and Failures
+
+Common loader settings:
+
+| Key | Default | Description |
+|---|---:|---|
+| `batch_size` | `256` | Points per upsert |
+| `concurrency` | CPUs - 1 | Upserts in flight |
+| `file_look_ahead` | `2` | Files prepared ahead of upload |
+| `file_retries` | `5` | Retries before a file is skipped |
+| `upsert_retries` | `5` | Retries before the run aborts |
+| `max_points_per_sec` | unlimited | Per-worker rate limit |
+
+If the vector store is overloaded, increase `vectorstore.timeout_s`, then reduce `concurrency` or set `max_points_per_sec`.
+
+Loader limits are per worker, so fleet-wide throughput scales with the number of workers.

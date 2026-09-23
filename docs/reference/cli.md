@@ -1,298 +1,164 @@
-# CLI Reference
+# CLI
 
-`nova` is a dispatcher: `nova <cmd> [args...]` finds `nova-<cmd>` on your `PATH`
-and execs it, forwarding all arguments untouched. Exit codes, signals, and
-stdio pass straight through.
+`nova <cmd> [args...]` runs the matching `nova-<cmd>` executable from your `PATH`.
 
 ```bash
-nova --help        # list every nova-* tool found on PATH
-nova --version     # dispatcher version
+nova --help
+nova --version
+nova <cmd> --help
 ```
 
-Each sub-tool owns its own argument parsing — `nova <cmd> --help` shows that
-tool's real flags.
-
-All tools read a YAML config and expand `${VAR}` / `${VAR:-default}` references
-from the environment. All shard themselves with `--num-jobs` / `--job-rank`
-(rank defaults to `$SKYPILOT_JOB_RANK`).
-
-## nova embed
-
-Embed a dataset into parquet (Python). Two subcommands; `run` is the default,
-so the bare form routes to it and the original interface is unchanged.
-
-### nova embed run (default)
+## `nova embed`
 
 ```bash
-nova embed <config> [--num-jobs N --job-rank R] [--dry-run]
-nova embed run <config> ...        # explicit form, identical
+nova embed <config> [--num-jobs N] [--job-rank R] [--dry-run]
+nova embed predict <config> [flags]
+```
+
+Common flags:
+
+| Flag | Meaning |
+|---|---|
+| `--num-jobs` | Total workers |
+| `--job-rank` | This worker's rank |
+| `--dry-run` | Preview config and work split |
+| `--gpu` | GPU model for `predict` |
+| `--num-gpus` | GPUs used for estimate |
+| `--rate` | Hourly GPU cost override |
+| `--output PATH` | Write prediction results as JSON |
+
+`predict` estimates embedding throughput, runtime, and cost without running the workload.
+
+Config: [Embed](../embedding.md).
+
+## `nova bf`
+
+```bash
+nova bf compute <config> [--num-jobs N] [--job-rank R] [flags]
+nova bf merge <config> [-j N] [--search NAME]...
+```
+
+Common `compute` flags:
+
+| Flag | Meaning |
+|---|---|
+| `--num-jobs` | Total workers |
+| `--job-rank` | This worker's rank |
+| `--io-workers` | Override I/O workers |
+| `--io-thread-count` | Override I/O threads |
+| `--cpu-thread-count` | Override CPU threads |
+| `--max-files` | Limit files for benchmarking; output is not valid full ground truth |
+
+`merge` combines distributed partial results.
+
+Config: [Brute Force](../brute-force/overview.md).
+
+## `nova load`
+
+```bash
+nova load run <config>
+nova load prepare <config>
+nova load load <config> --num-jobs N --job-rank R [--continue]
+nova load finalize <config>
+nova load reindex <config>
+nova load delete <config>
+nova load inspect <config>
 ```
 
 | Flag | Meaning |
-|------|---------|
-| `<config>` | Path to the embedder YAML (or `NOVA_CONFIG_PATH`) |
-| `--num-jobs` | Total parallel jobs; each rank embeds its `offset`/`limit` slice of the dataset |
-| `--job-rank` | This job's rank (0-indexed); defaults to `$SKYPILOT_JOB_RANK` |
-| `--dry-run` | Print the resolved plan (source, engine, storage, slice) and exit |
+|---|---|
+| `--num-jobs` | Total workers |
+| `--job-rank` | This worker's rank |
+| `--continue` | Resume an interrupted load |
 
-See [Embedding overview](../embedding/overview.md) for the config.
-
-### nova embed predict
-
-Predict throughput and cost for a config before committing GPUs — samples the
-dataset's token distribution and prices each forward pass; no GPU needed.
+Optional backends can be built with:
 
 ```bash
-nova embed predict <config> [--gpu h100 --num-gpus 8 ...]
+make load LOAD_FEATURES=elastic,opensearch,milvus
 ```
 
-See [Throughput Prediction](../embedding/throughput-prediction.md) for the
-method and full flag reference.
+Config: [Load](../loading/overview.md).
 
-## nova load
-
-Load pre-embedded parquet into a vector store (Rust). Subcommands split the
-lifecycle so a fleet can prepare once, load in parallel, and finalize once.
-
-```bash
-nova load run      <config>                          # single machine: all phases
-nova load prepare  <config>                          # master: create collection, defer indexing
-nova load load     <config> --num-jobs N --job-rank R  # worker: load this slice (no indexing mgmt)
-nova load load     <config> --num-jobs N --job-rank R --continue  # resume an interrupted worker
-nova load finalize <config>                          # master: re-enable + await indexing
-nova load reindex  <config>                          # patch HNSW/quantization/optimizers on an existing collection
-nova load delete   <config>                          # delete the collection if it exists
-nova load inspect  <config> [--num-jobs N --job-rank R]  # dry inspection (config + file slice)
-```
-
-- **`run`** is the single-machine shorthand for `prepare` + `load` + `finalize`.
-- For a fleet: `prepare` once, then `load` on every worker with its rank, then
-  `finalize` once after all workers exit. Files are partitioned by a deterministic
-  stride, so workers need no coordination.
-- `--num-jobs` / `--job-rank` apply to `load` and `inspect` only (the phases that
-  operate on a slice).
-- **`--continue`** (alias `--resume`, `load` only) resumes an interrupted worker:
-  it binary-searches the worker's slice — probing the store for each file's
-  first point id — and skips the files already fully loaded, re-upserting only
-  the boundary file (idempotent). Safe to pass on every rank, including ones
-  that finished. Same corpus and `--num-jobs` as the interrupted run required.
-  See [Resuming an interrupted load](../loading/overview.md#resuming-an-interrupted-load-continue).
-- **`reindex`** patches `vectorstore.params.{hnsw,quantization,optimizers}` on an
-  *already-existing* collection in place — no data is touched, and it doesn't
-  create the collection first. Useful for comparing index/quantization variants
-  against data you've already loaded once. See
-  [Collection-wide params](../loading/overview.md#collection-wide-params) for
-  the full knob list, including all quantization methods.
-- **`delete`** drops the collection if it exists (a no-op otherwise) — handy for
-  clearing out a variant between `reindex` sweeps.
-
-Files are partitioned by a deterministic stride, point ids are content-addressed
-(`vf_point_id`), and HNSW indexing is deferred during the bulk load and built
-once at `finalize`.
-
-## nova bf
-
-Brute-force exact k-NN ground truth (Python, GPU). Two subcommands: `compute`
-scores queries against a slice of the corpus and writes a per-rank partial;
-`merge` folds the partials into one final top-K. A single-GPU `compute` (no
-`--num-jobs`) writes the final result directly — no `merge` needed.
-
-```bash
-nova bf compute <config> [--num-jobs N --job-rank R] [--io-workers N] [--io-thread-count N] [--max-files N]
-nova bf merge   <config>
-```
-
-| Flag | Meaning |
-|------|---------|
-| `<config>` | Path to the brute-force YAML |
-| `--num-jobs` | Total parallel jobs; each rank scans a stride slice of the corpus files |
-| `--job-rank` | This job's rank (0-indexed); defaults to `$SKYPILOT_JOB_RANK` |
-| `--io-workers` | Override `params.io_workers` — concurrent corpus-file reader threads |
-| `--io-thread-count` | Override `params.io_thread_count` — pyarrow's IO pool (the real S3 fetch concurrency) |
-| `--max-files` | Read only the first N corpus files of this slice; a benchmarking aid (output is **partial**) |
-
-See [Brute-Force overview](../brute-force/overview.md) for the config, output schema, and tuning.
-
-## nova storm
-
-Load-test a vector store (Rust). Work is **replicated**, not partitioned — every
-worker runs the same profile, so total offered load ≈ `num_workers × {concurrency
-or rps} × batch_size`.
+## `nova storm`
 
 ```bash
 nova storm <config> [--json]
 ```
 
-The target backend is chosen by the config's `target.type` — `qdrant` (always
-built in) or `milvus` / `elastic` / `opensearch` (build with
-`--features elastic,opensearch,milvus`; `make storm STORM_FEATURES=...` does the
-same for an install). Those three require `query.vector_name` (the vector field)
-and don't yet support `query.filter`; `search_params` are validated per backend
-(`{ef_search, nprobes, rescore}` for opensearch). See
-`configs/storm/example.yaml`.
+`--json` emits one machine-readable summary line. Every distributed worker runs the same workload.
 
-The config's `load` block picks the mode:
-
-- **closed-loop** (default, `rps` unset) — hold `concurrency` requests in flight
-  for `duration_s`; measures max throughput at that depth.
-- **open-loop paced** (`rps > 0`) — launch a batch dispatch on a fixed `1/rps`
-  schedule with `concurrency` as an in-flight cap; avoids coordinated omission.
-
-`batch_size` (default `1`) is how many query vectors go in each dispatch (one
-batched round-trip per dispatch — Qdrant `query_batch`, Milvus batched search,
-or an Elasticsearch/OpenSearch `_msearch`) — not a special case at `1`, just the
-default.
-`rps` paces *dispatches*, not individual queries.
-
-Prints a latency summary at the end: requests/errors (dispatch counts),
-`batch_size`, `requests_per_sec` (dispatch rate) and `qps` (actual query
-throughput, `= requests_per_sec × batch_size`), p50/p95/p99/max latency (per
-dispatch), and recall stats (per query) if `ground_truth_column` is configured.
-`--json` prints that same summary as a single JSON line instead of the table —
-for a caller (e.g. a future `nova sweep`) that parses the result rather than
-scraping formatted text. All logging goes to stderr, so stdout is exactly one
-line with `--json` (safe to pipe straight into `jq` or a script).
-
-### Search-time tuning (`query.search_params`)
-
-Optional, server-side (Qdrant `SearchParams`) — distinct from the `load` block's
-client-side pacing knobs. Every field is optional; unset ones keep the
-collection's own defaults.
-
-```yaml
-query:
-  vector_name: dense
-  top_k: 10
-  source:
-    uri: s3://my-bucket/queries.parquet
-    column: query_embedding
-    ground_truth_column: hit_ids
-  search_params:
-    hnsw_ef: 128          # beam width at query time; higher = more accurate, slower
-    exact: false           # true = brute-force (bypasses HNSW *and* quantization)
-    quantization:
-      ignore: false        # true = search with full-precision vectors, skip the quantized index
-      rescore: true         # re-score quantized top-k candidates against full-precision vectors
-      oversampling: 2.0      # preselect oversampling × top_k candidates via the quantized index before rescoring
-```
-
-Use this to measure the recall/latency tradeoff of a quantized collection
-(loaded via `nova load`'s `vectorstore.params.quantization` — see
-[Collection-wide params](../loading/overview.md#collection-wide-params)) under
-different query-time settings without reloading data.
-
-### Filtering (`query.filter`)
-
-Optional payload/metadata filter, shaped like `nova bf`'s own filter (see
-[Brute-Force overview](../brute-force/overview.md)) — `must`/`should`/`must_not`
-groups of `match`/`range`/`match_text` conditions — so a filter authored for a
-`nova bf` ground-truth run and a `nova storm` load test read the same way.
-Translating this into an actual request is backend-specific; today that's
-Qdrant's own `Filter`.
-
-A **static** filter applies uniformly to every query in the run:
-
-```yaml
-query:
-  source:
-    uri: s3://my-bucket/queries.parquet
-    column: query_embedding
-  filter:
-    must:
-      - field: category
-        match: shoes
-      - field: price
-        range:
-          gte: 10.0
-          lt: 100.0
-    should:
-      - field: description
-        match_text: "waterproof hiking"
-```
-
-A **per-query** filter pulls each condition's comparison value from a column in
-the *queries* file instead of a literal — `match_from_query`,
-`range_from_query`, `match_text_from_query` — so two different queries in the
-same run can each be restricted to a different subset (their own tenant,
-budget, or search phrase):
-
-```yaml
-query:
-  source:
-    uri: s3://my-bucket/queries.parquet
-    column: query_embedding
-  filter:
-    must:
-      - field: tenant_id
-        match_from_query: tenant_column   # each query's own tenant, from this column
-      - field: budget
-        range_from_query:
-          lt: max_budget                   # each query's own ceiling
-```
-
-Every column a `_from_query` condition names is read alongside that query's
-vector when the queries file is loaded — a NULL in one of those columns is a
-load-time error, not "no filter for this query": use a non-matching
-placeholder value instead (the same convention `nova bf`'s own MS MARCO
-configs use for unused per-query slots, e.g. `domain_slot_N` columns holding
-`"zzznomatchzzz000"`).
-
-**Qdrant caveat**: Qdrant's match condition has no float-equality variant (only
-keyword, integer, bool, and `MatchAny` lists of integers or keywords) — a
-`match`/`match_from_query` value that's a float, or a `MatchAny` list that mixes
-types, is rejected with a clear error (at config-load time for a static filter,
-at query-dispatch time for a per-query one, since the value there comes from
-data). Use `range`/`range_from_query` with equal `gte`/`lte` bounds for a
-numeric equality check instead.
-
-## nova sweep
-
-Orchestrate `nova-load` + `nova-storm` across a matrix of collection/index/search
-configs (Python), producing one combined recall/latency/throughput report.
-Ground truth is out of scope — point `queries:` at a parquet already produced
-by `nova bf` (or equivalent); `nova sweep` never invokes `nova bf` itself.
+Optional backends:
 
 ```bash
-nova sweep <config.yaml> [--skip-insert] [--cleanup] [--dry-run]
+make storm STORM_FEATURES=elastic,opensearch,milvus
 ```
 
-- `target.type` is **required** and selects the backend: `qdrant`, `milvus`,
-  or `elastic`. (`nova-load`/`nova-storm` additionally support `opensearch`;
-  `nova sweep` has no adapter for it yet.) Each carries its own
-  `target:` fields and search-param vocabulary (`{hnsw_ef, exact,
-  quantization}` / `{ef, nprobe}` / `{num_candidates}`); see the Sweep
-  overview's "Target backends" section.
-- The config declares three cartesian-grid axes — `data_layouts` (structural,
-  forces a fresh `nova-load run`), `index_variants` (patched in place via
-  `nova-load reindex`, no reload), `searches` (storm-only, no store-side
-  change) — expanded and swept as **one collection per `data_layouts` entry,
-  reused across every `index_variant`**, never a new collection per variant.
-  The base collection name is now required explicitly in the config via
-  `collection_name`; it is no longer inferred from the config filename.
-- `index_variants` are walked in an order chosen to minimize rebuild cost
-  (HNSW changes grouped together, quantization changes absorb the frequent
-  transitions — small-scale empirical testing showed quantization changes
-  reindex meaningfully faster), not declaration order. This cost sort keys off
-  Qdrant's `hnsw.*` fields only; for Milvus/Elastic it is a no-op and variants
-  run in declaration order (relevant for Elastic, where HNSW `m` may only
-  increase across in-place reindexes).
-- If a sweep's target collection already exists, the run **errors and exits
-  immediately** rather than guessing what to do with it — pass `--skip-insert`
-  to reuse it as-is (skips that data_layout's insert phase entirely), or set
-  `target.recreate: always` in the config to force a fresh reload every time.
-- `--cleanup` deletes only the collections *this run* inserted into — never
-  one reused via `--skip-insert`.
-- `--dry-run` prints the expanded slice/point counts and which data_layouts
-  would need `--skip-insert`, without executing anything.
-- Single machine, sequential — no `--num-jobs`/`--job-rank` yet (a single
-  target has nothing to shard across; see the [Sweep overview](../sweep/overview.md#distribution)).
+Config: [Storm](../storm/overview.md).
 
-See the [Sweep overview](../sweep/overview.md) for the full config schema and
-worked examples.
+## `nova sweep`
 
-## Local dev: overriding a tool's location
+```bash
+nova sweep <config> [--skip-insert] [--cleanup] [--dry-run]
+```
 
-`nova` resolves `nova-<cmd>` on `PATH`. For local iteration, build a tool and put
-it ahead on `PATH` (e.g. `cargo build -p nova-load && export
-PATH="$PWD/target/debug:$PATH"`), or install it into place with the matching
-`make` target.
+| Flag | Meaning |
+|---|---|
+| `--skip-insert` | Reuse existing collections |
+| `--cleanup` | Delete collections created by the run |
+| `--dry-run` | Preview the sweep without executing it |
+
+Config: [Sweep](../sweep/overview.md).
+
+## `nova dist`
+
+Launches distributed runs with SkyPilot.
+
+```bash
+nova dist embed <config> --num-jobs N
+nova dist load <config> --num-jobs N [--continue]
+nova dist load <config> --finalize
+nova dist bf compute <config> --num-jobs N
+nova dist bf merge <config>
+nova dist storm <config> --num-jobs N
+```
+
+Common flags:
+
+| Flag | Meaning |
+|---|---|
+| `--num-jobs` | Number of workers |
+| `--pool-name` | SkyPilot pool name |
+| `--resources FILE` | Resource configuration |
+| `--dry-run` | Preview without launching |
+| `--continue` | Resume distributed loading |
+| `--finalize` | Finalize a distributed load |
+
+`nova dist sweep` is not currently implemented.
+
+Details: [Distributed](../distributed.md).
+
+## `nova inspect`
+
+```bash
+nova inspect <path>
+```
+
+Reports Parquet file count, vector count, schema, and vector dimensions for local or S3 inputs.
+
+Install with:
+
+```bash
+make inspect
+```
+
+## Local Development
+
+`nova` runs the first matching `nova-<cmd>` on `PATH`, so put local builds first:
+
+```bash
+cargo build -p nova-load
+export PATH="$PWD/target/debug:$PATH"
+nova --help
+```
+
+Python tools installed with `make` use editable installs, so code changes apply without reinstalling.

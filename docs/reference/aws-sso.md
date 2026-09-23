@@ -47,7 +47,7 @@ After that, the workflow is:
 ```bash
 aws sso login --profile sandbox
 eval "$(aws configure export-credentials --profile sandbox --format env)"
-nova load configs/loader/ccnews_bge_large.yaml
+nova load run configs/loader/ccnews_bge_large.yaml
 ```
 
 ## 3. SkyPilot Usage

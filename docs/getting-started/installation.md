@@ -1,81 +1,91 @@
 # Installation
 
-supernova is polyglot. The `nova` CLI is a git-style dispatcher — `nova <cmd>`
-execs a `nova-<cmd>` executable on your `PATH` — so you install the dispatcher
-once, then add only the sub-tools you need.
+`nova` is a git-style dispatcher: `nova <cmd>` runs a `nova-<cmd>` executable
+from your `PATH`. Install the dispatcher once, then only the tools a machine
+needs.
 
 ## Requirements
 
-- [uv](https://docs.astral.sh/uv/) — for the Python pieces (`nova`, `nova embed`)
-- [Rust / cargo](https://rustup.rs/) — for the Rust tools (`nova load`, `nova storm`)
-- Python 3.11+
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- [Rust / cargo](https://rustup.rs/) for `nova load`, `nova storm`,
+  `nova inspect`, and the native extension `nova bf` builds
+- A CUDA GPU for `nova bf compute` and for embedding at any real scale
+  (`nova embed` falls back to MPS or CPU)
+- `protoc`, only if you build the optional Milvus backend
 
-## The fast path
+## Install everything
 
 ```bash
 git clone <repo-url> supernova && cd supernova
+uv venv && source .venv/bin/activate   # the Python tools install into this venv
 make all
+export PATH="$HOME/.cargo/bin:$PATH"   # Rust tools land here
+nova --help                            # lists every nova-* tool it can find
 ```
 
-`make all` installs the `nova` dispatcher plus all sub-tools. Then put the
-install dirs on your `PATH` so `nova` can find the sub-tools:
+The Python tools install into the active virtualenv, so activate it in every
+shell you use `nova` from.
+
+## Install one tool at a time
+
+| Target | Command | Language | Notes |
+|---|---|---|---|
+| `make cli` | `nova` | Python | The dispatcher. No dependencies. |
+| `make embed` | `nova embed` | Python | Pulls torch, sentence-transformers, and more. |
+| `make load` | `nova load` | Rust | Installs to `~/.cargo/bin`. |
+| `make storm` | `nova storm` | Rust | Installs to `~/.cargo/bin`. |
+| `make inspect` | `nova inspect` | Rust | Dev tool: vector count and parquet schema. |
+| `make bf` | `nova bf` | Python + Rust | Pulls torch and builds `nova-textscan`. |
+| `make sweep` | `nova sweep` | Python | Runs on the controller; needs `nova load` and `nova storm` on `PATH`. |
+| `make dist` | `nova dist` | Python | Runs on the controller; pulls SkyPilot. |
+
+A machine that only runs `nova bf merge` doesn't need torch:
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"     # Rust binaries: nova-load, nova-storm
-export PATH="$HOME/.local/bin:$PATH"     # uv/pip user scripts: nova, nova-embed
+uv pip install -e python/nova-bf ./crates/nova-textscan
 ```
 
-Verify:
+### Other vector stores
+
+`nova load` and `nova storm` build with Qdrant support only by default. To add
+the other backends:
 
 ```bash
-nova --help        # lists every nova-* tool found on PATH
+make load  LOAD_FEATURES=elastic,opensearch,milvus    # milvus needs protoc
+make storm STORM_FEATURES=elastic,opensearch,milvus
 ```
 
-## Installing piece by piece
+## Fleet runs
 
-Each `make` target maps to one tool. Install only what a given machine needs.
-
-| Target | Installs | Command it provides |
-|--------|----------|---------------------|
-| `make cli`   | the dispatcher (zero deps, instant) | `nova` |
-| `make embed` | Python ML stack (torch, sentence-transformers, …) | `nova embed` |
-| `make load`  | Rust binary → `~/.cargo/bin` | `nova load` |
-| `make storm` | Rust binary → `~/.cargo/bin` | `nova storm` |
+There's nothing extra to install on workers. `nova dist` installs the tools on
+each node it launches, so only the controller needs `make dist`. See
+[Distributed](../distributed.md).
 
 ## Environment variables
 
-Set the variables relevant to your workflow. Configs reference them with
-`${VAR}` (or `${VAR:-default}`), expanded at load time. Some examples of what each tool might need:
+Configs read these through `${VAR}` or `${VAR:-default}`. Set only the ones
+your run uses.
 
-### Embedding (`nova embed`)
-
-| Variable | Required for |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI embedder |
-| `HF_TOKEN` | Private HF source datasets; writing to `hf://buckets/...` |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | S3 storage backend |
-
-### Loading (`nova load`) & storm (`nova storm`)
-
-| Variable | Required for |
-|----------|-------------|
-| `QDRANT_URL` / `QDRANT_API_KEY` | The Qdrant cluster |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Reading corpora from S3 |
-| `AWS_SESSION_TOKEN` | S3 via AWS SSO (temporary credentials) |
+| Variable | Used for |
+|---|---|
+| `QDRANT_URL`, `QDRANT_API_KEY` | The Qdrant cluster (`nova load`, `nova storm`, `nova sweep`) |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Reading or writing S3 |
+| `AWS_SESSION_TOKEN` | S3 with temporary credentials (see [AWS SSO](../reference/aws-sso.md)) |
 | `AWS_REGION` | S3 region (defaults to `us-east-1`) |
-
-## Distributed
-
-There's nothing extra to install for distributed runs. Each tool shards itself
-from `--num-jobs` / `--job-rank` (rank defaults to `$SKYPILOT_JOB_RANK`). Your
-orchestrator provisions the nodes and invokes `nova <tool>` on each — see the
-[Quickstart](quickstart.md#distributed) for the pattern.
+| `HF_TOKEN` | Private Hugging Face datasets, writing to `hf://` |
+| `OPENAI_API_KEY` | The OpenAI embedder |
 
 ## Verify
 
 ```bash
-nova --help
-nova embed --help
-nova load --help     # subcommands: run / prepare / load / finalize / inspect
-nova storm --help
+nova --help          # every nova-* tool found on PATH
+nova load --help     # run, prepare, load, finalize, reindex, delete, inspect
+nova bf --help       # compute, merge
+```
+
+## Build these docs
+
+```bash
+make docs            # live preview at http://localhost:8000 (needs uv)
+make docs-build      # static site in site/
 ```

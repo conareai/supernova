@@ -2,13 +2,16 @@
 
 `supernova` is a toolkit for building large-scale vector search benchmarks. It does five things:
 
-1. **Embedding generation** — take a dataset, embed it with any model (dense, sparse, or multivector), and produce parquet files.
+1. **Embedding generation** — take a dataset, embed it with any model (dense, sparse, or multivector).
 2. **Ground truth computation** — perform brute-force, exact, nearest neighbour search over a corpus.
 3. **Vector store loading** — take pre-embedded parquet files and load them into a vector database.
 4. **Query testing** — fire a query load at a vector store to measure its latency and recall.
 5. **Parameter sweeping** — orchestrate loading + load testing across a matrix of index/search configs, in one combined report
 
 Each is its own, self-contained tool, and each tool partitions work to allow parallelization via `--num-jobs` / `--job-rank`.
+
+![supernova pipeline: embed, compute ground truth, load, and query-test](fig/generic_pipeline.svg){ .center width="560" style="margin-top: 2em" }
+
 ## Mental model
 
 The pipelines are independent and meant to be reproducible. Each tool doesn't know that the others exist. You can run them separately, on different machines, and at different times. The intermediate parquet files connect each step.
@@ -36,4 +39,4 @@ Distributed runs are just N copies of a tool, each with its own `--job-rank`. Or
 - **YAML-driven** — every run is defined by a YAML config; `${VAR}` / `${VAR:-default}` references are expanded from the environment.
 - **Flat parquet output** — embedding output is flat columnar data (no nested JSON). Payload composition happens at load time.
 
-See the [CLI reference](reference/cli.md) for every flag, and the [Embedding](embedding/overview.md), [Loading](loading/overview.md), [Brute Force](brute-force/overview.md), and [Sweep](sweep/overview.md) sections for each tool's config.
+See the [CLI reference](reference/cli.md) for every flag, and the [Embedding](embedding.md), [Loading](loading/overview.md), [Brute Force](brute-force/overview.md), and [Sweep](sweep/overview.md) sections for each tool's config.
