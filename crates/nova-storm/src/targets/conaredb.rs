@@ -113,7 +113,8 @@ struct Expander {
 }
 
 fn open(path: &str) -> Result<(File, u64), TargetError> {
-    let f = File::open(path).map_err(|e| TargetError::Other(format!("conaredb expand: {path}: {e}")))?;
+    let f = File::open(path)
+        .map_err(|e| TargetError::Other(format!("conaredb expand: {path}: {e}")))?;
     let len = f
         .metadata()
         .map_err(|e| TargetError::Other(format!("conaredb expand: {path}: {e}")))?
@@ -129,14 +130,26 @@ fn le_uint(b: &[u8]) -> u64 {
 
 fn uuid_string(b: &[u8]) -> String {
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 impl Expander {
     fn new(c: &ExpandConfig) -> Result<Self, TargetError> {
-        for (name, w) in [("offsets_bytes", c.offsets_bytes), ("postings_bytes", c.postings_bytes)] {
+        for (name, w) in [
+            ("offsets_bytes", c.offsets_bytes),
+            ("postings_bytes", c.postings_bytes),
+        ] {
             if !(1..=8).contains(&w) {
-                return Err(TargetError::Other(format!("conaredb expand: {name} must be 1..=8 (got {w})")));
+                return Err(TargetError::Other(format!(
+                    "conaredb expand: {name} must be 1..=8 (got {w})"
+                )));
             }
         }
         let (offsets, olen) = open(&c.offsets)?;
@@ -149,7 +162,11 @@ impl Expander {
         let rows = olen / c.offsets_bytes as u64 - 1;
         let (postings, plen) = open(&c.postings)?;
         let uuids = c.uuids.as_deref().map(open).transpose()?;
-        let entry = if uuids.is_some() { c.postings_bytes as u64 } else { 16 };
+        let entry = if uuids.is_some() {
+            c.postings_bytes as u64
+        } else {
+            16
+        };
         if plen % entry != 0 {
             return Err(TargetError::Other(format!(
                 "conaredb expand: {} is {plen} bytes, not a whole number of {entry}-byte postings",
@@ -159,7 +176,9 @@ impl Expander {
         if let Some((_, ulen)) = &uuids
             && ulen % 16 != 0
         {
-            return Err(TargetError::Other(format!("conaredb expand: uuid table is {ulen} bytes, not 16-byte ids")));
+            return Err(TargetError::Other(format!(
+                "conaredb expand: uuid table is {ulen} bytes, not 16-byte ids"
+            )));
         }
         let e = Expander {
             offsets,
@@ -183,7 +202,10 @@ impl Expander {
         tracing::info!(
             "conaredb expand: {rows} distinct rows, {} postings{} (disclosed expansion proxy, in the measured path)",
             e.postings_len,
-            e.uuids.as_ref().map(|(_, n)| format!(", {n}-id uuid table")).unwrap_or_default()
+            e.uuids
+                .as_ref()
+                .map(|(_, n)| format!(", {n}-id uuid table"))
+                .unwrap_or_default()
         );
         Ok(e)
     }
@@ -200,11 +222,16 @@ impl Expander {
     /// Up to `want` corpus ids of distinct row `row`, in posting order.
     fn ids(&self, row: u64, want: usize, out: &mut Vec<String>) -> Result<usize, String> {
         if row >= self.rows {
-            return Err(format!("expand: distinct row {row} >= the CSR's {} rows", self.rows));
+            return Err(format!(
+                "expand: distinct row {row} >= the CSR's {} rows",
+                self.rows
+            ));
         }
         let (start, end) = (self.offset(row)?, self.offset(row + 1)?);
         if start >= end || end > self.postings_len {
-            return Err(format!("expand: row {row} has an empty or out-of-range posting list [{start}, {end})"));
+            return Err(format!(
+                "expand: row {row} has an empty or out-of-range posting list [{start}, {end})"
+            ));
         }
         let n = ((end - start) as usize).min(want);
         let w = self.postings_bytes;
@@ -218,7 +245,9 @@ impl Expander {
                 Some((table, len)) => {
                     let ord = le_uint(chunk);
                     if ord >= *len {
-                        return Err(format!("expand: ordinal {ord} >= the uuid table's {len} ids"));
+                        return Err(format!(
+                            "expand: ordinal {ord} >= the uuid table's {len} ids"
+                        ));
                     }
                     let mut u = [0u8; 16];
                     table
@@ -285,7 +314,16 @@ impl ConareDbConfig {
 
 impl fmt::Display for ConareDbTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "conaredb({}{})", self.url, if self.expand.is_some() { ", expand" } else { "" })
+        write!(
+            f,
+            "conaredb({}{})",
+            self.url,
+            if self.expand.is_some() {
+                ", expand"
+            } else {
+                ""
+            }
+        )
     }
 }
 
@@ -315,7 +353,10 @@ impl ConareDbTarget {
         let text = resp.text().await.map_err(|e| (e.to_string(), false))?;
         if !status.is_success() {
             let code = status.as_u16();
-            return Err((format!("search HTTP {status}: {text}"), code == 408 || code == 504));
+            return Err((
+                format!("search HTTP {status}: {text}"),
+                code == 408 || code == 504,
+            ));
         }
         serde_json::from_str(&text).map_err(|e| (format!("search: {e}: {text}"), false))
     }
@@ -339,7 +380,9 @@ impl ConareDbTarget {
                     if ids.len() >= k {
                         break;
                     }
-                    let served: u64 = id.parse().map_err(|_| format!("hit id `{id}` is not a row ordinal"))?;
+                    let served: u64 = id
+                        .parse()
+                        .map_err(|_| format!("hit id `{id}` is not a row ordinal"))?;
                     let row = served
                         .checked_sub(x.id_offset)
                         .ok_or_else(|| format!("hit id {served} < id_offset {}", x.id_offset))?;
@@ -379,18 +422,30 @@ impl QueryTarget for ConareDbTarget {
             denses.push(dense);
         }
         let results = futures::future::join_all(denses.iter().map(|d| self.one(d))).await;
-        let want_scores = self.collect_scores.load(std::sync::atomic::Ordering::Relaxed);
+        let want_scores = self
+            .collect_scores
+            .load(std::sync::atomic::Ordering::Relaxed);
         let mut ids = Vec::with_capacity(queries.len());
         let mut scores = Vec::with_capacity(queries.len());
         for (i, result) in results.into_iter().enumerate() {
             let value = match result {
                 Ok(v) => v,
                 Err((message, timed_out)) => {
-                    return fail(started, queries.len(), format!("query {i}: {message}"), timed_out);
+                    return fail(
+                        started,
+                        queries.len(),
+                        format!("query {i}: {message}"),
+                        timed_out,
+                    );
                 }
             };
             let Some(hits) = value["hits"].as_array() else {
-                return fail(started, queries.len(), format!("query {i}: no `hits` array: {value}"), false);
+                return fail(
+                    started,
+                    queries.len(),
+                    format!("query {i}: no `hits` array: {value}"),
+                    false,
+                );
             };
             // Expansion runs even when recall is off, so latency-only runs pay
             // the same in-path cost as recall runs.
@@ -428,7 +483,8 @@ impl QueryTarget for ConareDbTarget {
     }
 
     fn disable_score_collection(&self) {
-        self.collect_scores.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.collect_scores
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -453,8 +509,14 @@ mod tests {
     fn expands_rows_in_rank_then_posting_order_until_k() {
         let dir = tempfile::tempdir().unwrap();
         // 3 distinct rows: row0 -> ordinals [4, 1], row1 -> [0], row2 -> [2, 3, 5]
-        let offs: Vec<u8> = [0u64, 2, 3, 6].iter().flat_map(|x| x.to_le_bytes()).collect();
-        let posts: Vec<u8> = [4u64, 1, 0, 2, 3, 5].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let offs: Vec<u8> = [0u64, 2, 3, 6]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        let posts: Vec<u8> = [4u64, 1, 0, 2, 3, 5]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
         let table: Vec<u8> = (0..6u8).flat_map(uuid).collect();
         let cfg = ExpandConfig {
             offsets: write(dir.path(), "o", &offs),
@@ -481,7 +543,10 @@ mod tests {
             json!({"id": "2", "score": 0.7}),
         ];
         let (ids, scores) = t.hits(&hits).unwrap();
-        let want: Vec<String> = [2u8, 3, 5, 4].iter().map(|&i| uuid_string(&uuid(i))).collect();
+        let want: Vec<String> = [2u8, 3, 5, 4]
+            .iter()
+            .map(|&i| uuid_string(&uuid(i)))
+            .collect();
         assert_eq!(ids, want);
         assert_eq!(scores, vec![0.9, 0.9, 0.9, 0.8]);
         assert_eq!(ids[0], "02000000-0000-0000-0000-0000000000ab");
