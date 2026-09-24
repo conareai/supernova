@@ -3,15 +3,46 @@
 **Strict recall@10 = 0.9730** (lower bound, exact FineWeb-uuid matches) on 95,000 held-out test queries, with all
 10,074,324,060 documents served from **one Azure Standard_L96as_v4**. The tie-aware upper bound is 0.9861 at nova-storm's
 auto tolerance for float16 storage (2e-3), and 0.9756 at the 5e-6 float32 tolerance. Numbers are the median of 3 repeats
-of a config frozen before any test query was sent. Every run had 0 errors, 0 timeouts and `missing_from_gt` 0.
+of a config frozen before any test query was sent. `missing_from_gt` is 0 in every run; the only errors in the 3,515,000 top_k 10
+test requests of all 37 runs are 2 × HTTP 429 in one c256 run (below).
 
 | Load (top_k 10, batch 1, one client) | QPS | p50 ms | p95 ms | p99 ms | max ms | errors |
 |---|---:|---:|---:|---:|---:|---:|
-| closed loop, concurrency 32 | 595.2 | 53.2 | 64.1 | 69.8 | 172.0 | 0 / 95,000 × 3 |
+| closed loop, concurrency 1 | 42.9 | 22.6 | 27.8 | 49.9 | 74.6 | 0 / 95,000 × 3 |
+| closed loop, concurrency 16 | 441.7 | 36.0 | 44.3 | 48.5 | 124.5 | 0 / 95,000 × 3 |
+| **closed loop, concurrency 32** | **595.2** | **53.2** | **64.1** | **69.8** | 172.0 | 0 / 95,000 × 3 |
+| closed loop, concurrency 64 | 614.1 | 102.2 | 147.4 | 168.6 | 267.2 | 0 / 95,000 × 3 |
+| closed loop, concurrency 256 | 623.5 | 407.8 | 496.5 | 539.7 | 698.6 | 2 / 95,000 × 3 (HTTP 429 `queue_full`, one run, first 9 ms) |
+| open loop, 100 rps | 100.0 | 22.2 | 29.0 | 40.3 | 93.7 | 0 / 95,000 × 3 |
 | open loop, 200 rps | 200.0 | 25.3 | 31.4 | 35.3 | 99.8 | 0 / 95,000 × 3 |
 | open loop, 400 rps | 399.9 | 34.1 | 42.4 | 46.6 | 123.5 | 0 / 95,000 × 3 |
+| open loop, 600 rps | 599.9 | 52.3 | 100.3 | 151.4 | 286.8 | 0 / 95,000 × 3 |
+| open loop, 800 rps offered: **above capacity** | 624.2 achieved | 405.8 | 493.4 | 546.1 | 710.6 | 0 / 95,000 × 3 |
 
-Recall is identical in all 9 runs: same frozen server, and the per-query recall histogram is the same in every run.
+**Capacity:** one L96 saturates at **~620 QPS** at top_k 10 (c64 614, c256 624; 800 rps offered → 624 achieved in all 3
+repeats). At 800 rps nova-storm's 256 in-flight slots stay full; it measures latency from dispatch, so the time waiting for a
+slot (33.5 s of schedule lag over a run) is not in the latency columns. The server queued rather than rejected: the only 429s are
+the 2 in the first 9 ms of one c256 run (the initial 256-request burst). c32/200/400 rows: `runs/` (first lane);
+all other rows: `final/` (final lane, `final/README.md`).
+
+### Qdrant's own load shape: top_k 100, 160 in flight, 1,200 s
+
+Qdrant's `fineweb-10b` branch (6a0bc58) tests FineWeb-10B with `configs/storm/fineweb_bf_k1000_fleet.yaml`: top_k 100,
+10 replicated workers × concurrency 16, 1,200 s, the query file cycled. We ran the same 160 in flight as one nova-storm process
+(ten replicated workers would each start at query 0 and send the same query ten times at once), 1,200 s, on the 95,000 test
+queries. One run per config; recall is the mean over all firings (the file cycles ~5-8 times).
+
+| Config | requests | QPS | strict recall@100 | tie 2e-3 | p50 ms | p95 ms | p99 ms | errors |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| frozen headline config (12k leaves, rescore 400) | 753,902 | 628.1 | **0.9584** | 0.9838 | 251.9 | 321.8 | 359.9 | 0 |
+| tuned for top_k 100 on dev only (18k leaves, rescore 1000) | 476,554 | 397.0 | **0.9689** | 0.9886 | 399.3 | 553.5 | 617.9 | 0 |
+
+The top_k 100 config was picked on dev q0–4999 by a rule written before the lane (lowest dev p99 among 8 grid points with dev
+strict recall@100 ≥ 0.97; it had 0.9712 on dev) and pushed (`final/FREEZE-top100.json`) before its first test query. Neither
+config reaches 0.97 strict recall@100 on test. The box is saturated at 160 in flight, so these latencies are mostly queueing
+(160 / QPS ≈ p50). The exact-search ceiling at @100 with our regenerated query vectors was not measured (the @10 one is 0.99878).
+
+Recall@10 is identical in all 34 top_k 10 test runs with expansion on (same frozen config; the c256 run with 2 errors scored 94,998 queries and gets 0.9729942).
 
 | Recall@10 on test (95,000 queries) | value |
 |---|---:|
@@ -45,7 +76,7 @@ upper bound is a clean number. Quote the strict one.
 | Query vectors | Qdrant's `queries/scripts/regenerate_queries.py` @ 420f4686 (sha256 `7bdd686a…`), all 100,000 queries in **one** run (no `--limit`). `verify_regeneration.py`: dense ok, 100,000 rows. gte-multilingual-base revision `9bbca17d`. Qdrant does not ship query vectors |
 | Split | dev = q0–4999 (all tuning), test = q5000–99999 (95,000 queries). `splits.json` was pushed before any query was sent |
 | Load generator and scorer | nova-storm from this fork: upstream master b8e5b07 + the `conaredb` target (`crates/nova-storm/src/targets/conaredb.rs`), commit 7d7d0d3 (merged as ce6690e), binary sha256 `a5450143…` (`runs/client-sha256.txt`) |
-| Engine | ConareDB v2 `conaredb-server`, conareai/conare main `c136d6788`, sha256 `cd60f49a…`. The index was built by main `004bf571b` (builder sha256 `b016a0ac…`) |
+| Engine | ConareDB v2 `conaredb-server`, conareai/conare main `c136d6788`, sha256 `cd60f49a…`. Index built by `conaredb-bench build` main `411e597b3` (sha256 `04bc106a…`), spilled by main `004bf571b` (`e1a563ec…`), imported by `conaredb-import` `e018eb15…` (`final/s7/`) |
 | Frozen server config | 12,000 leaves, exact_centroids 15,000, routing_candidates 384,000, rescore 400, max_inflight 96, 96 workers, scan 4 + route 4 threads. server.json sha256 `4beb0731…` (`freeze/server.redacted.json`; only the bearer token is redacted). The server has no result cache |
 | Index | 2,557,787,738 distinct vectors plus 767,336,321 spill rows (30% selective spill), manifest sha256 `c45e971d…` |
 
@@ -57,15 +88,20 @@ upper bound is a clean number. Quote the strict one.
 4. **Cache.** Warmed with one dev pass (`runs/s6-warm-dev-c32.*`), never with test queries. Each run sends every test query exactly once (`passes: 1`). Repeats 2 and 3 reuse the test queries, so their page cache is warmer (c32 rep1 568.7 QPS vs about 595 for rep2 and rep3).
 5. **Median of 3 per load shape**, each metric taken separately (`runs/s6-medians.json`). All 9 raw runs are included.
 6. **Interruption.** The last run (r400 rep3) went out 3.6 h after the other eight, on the same server process. Its latency matches rep1 and rep2.
+7. **Final lane** (06:45–11:46Z, rules `final/RULES.md` pushed first): the S6 grid c1/c16/c64/c256 and 100/600/800 rps × 3, the
+   expansion on/off A/B, the top_k 100 dev tuning and the fleet-shape runs. Server identity was logged every 30 s; a run counts
+   only if every line from 60 s before to 60 s after it shows the expected process and shas. One run (800 rps rep3) failed that
+   window because the config file was rewritten for the next dev step 38 s after it ended; it is published, marked void, and was
+   rerun (`rep3r`), which the median uses. Every run's JSON re-aggregates exactly from its raw rows (`final/reagg-final.json`).
 
 ## Disclosures that affect comparability
 
 - **Duplicates are collapsed; ids are expanded in the client.** 74.6% of FineWeb-10B rows are byte-identical copies of another row's vector. The largest group has 55,725 copies; a 100k sampled merge audit found every merge byte-identical. The engine stores each distinct vector once (2,557,787,738) and returns distinct-row ids. Its 32-bit point ids cannot hold 10.07B uncollapsed points.
-- **How the expansion works.** The `conaredb` target maps each returned row to its FineWeb uuids through a CSR table (offsets + 16-byte uuids, 181 GB on the client's NVMe). It fills the 10 slots in rank order. The lookups run **inside** the measured latency, on the client box.
+- **How the expansion works.** The `conaredb` target maps each returned row to its FineWeb uuids through a CSR table (offsets + 16-byte uuids, 181 GB on the client's NVMe). It fills the 10 slots in rank order. The lookups run **inside** the measured latency, on the client box. **Its cost, measured** (same server and queries, back to back, only `expand` toggled; `final/s3-expansion-ab.json`): c32 Δp50 −0.09 ms, Δp99 −0.05 ms (mean of two on/off pairs, order reversed in the second); 200 rps Δp50 +0.43 ms, Δp99 +0.54 ms.
 - **Copy order inside a duplicate group: ascending uuid.** This is nova-bf's own tie-break for ids (`params.tiebreak: id` in `nova_bf/tiebreak.py`). The published ground truth follows it in 71,045 of 71,045 test groups split at the cutoff; corpus order reproduces 6,678. With corpus order the best possible strict recall@10 is 0.834, because any engine that returns one id per hit is capped there.
 - **Query vectors are regenerated.** Ours differ from the ones used for the ground truth by up to 2.3e-4 in score (mean 1.3e-5). Exact search with our vectors therefore reaches strict 0.99878, not 1.0 (612 of 95,000 test queries have a reordered near-tie at the cutoff), and the engine loses 0.0258 against that ceiling (`ceiling.json`).
-- **Index build is outside Supernova.** The index was built offline by ConareDB's own pipeline (global dedupe → build → spill → import on the same L96). It was not loaded with `nova-load`, so there is no `nova-load` load time. The stage wall times are 2:47:24 for the clean stages (≈ $23 at $8.256/h). Per-box dedupe on 3 × L96, the transfer, and the HF download and prep were not timed end to end.
-- **Load shapes.** One client ran closed loop at c32 and open loop at 200 and 400 rps. We did not run Qdrant's fleet shape from the `fineweb-10b` branch (10 workers × concurrency 16, top_k 100, 20 min), top_k 100/1000, single-client c1 latency, or open-loop rates above 400 rps. The c32 closed loop (595 QPS) is the highest throughput measured on test.
+- **Index build is outside Supernova.** The index was built offline by ConareDB's own pipeline (global dedupe → build → spill → import on the same L96). It was not loaded with `nova-load`, so there is no `nova-load` load time. The stage wall times are 2:47:24 for the clean stages (≈ $23 at $8.256/h); the sha256 of every stage binary still on the box is in `final/s7/binaries.tsv`. Per-box dedupe on 3 × L96 and the transfer are in logs only partly, and their binaries' hashes are lost with the deleted boxes. **The HF download → f16 prep was never timed and was not re-run**, so its cost is in no figure here.
+- **Load shapes.** One client box. top_k 10: closed loop c1–c256 and open loop 100–800 rps, 3 repeats each. top_k 100: Qdrant's fleet shape as one process at c160 (above). top_k 1000 was not run (the server's `max_top_k` is 100).
 - **Recall@10 only.** RBO is described in the current docs, but nova-storm at b8e5b07 does not compute it, so it is not reported.
 
 ## Licences
@@ -77,7 +113,13 @@ upper bound is a clean number. Quote the strict one.
 
 | Path | Content |
 |---|---|
-| `runs/s6-test-{c32,r200,r400}-rep{1,2,3}.json` | nova-storm `--json` summaries (schema_version 2) |
+| `runs/s6-test-{c32,r200,r400}-rep{1,2,3}.json` | nova-storm `--json` summaries (schema_version 2), first lane |
+| `final/runs/` | final lane, every run: `s6-{c1,c16,c64,c256,r100,r600,r800}-rep*` (grid), `s3-*` (expansion A/B), `fleet-k100-*` (Qdrant shape), `dev-k100-*` (top_k 100 dev tuning), `f-warm*` (dev warm passes); `.json`, `.yaml`, `.log`, `.ts.jsonl.gz`, `runs.log` |
+| `final/README.md`, `final/RULES.md` | final lane write-up and the rules pushed before it ran |
+| `final/final-runs.tsv`, `final/final-medians.json`, `final/reagg-final.json` | per-run table with identity check, medians, raw-row re-aggregation |
+| `final/identlog.txt`, `final/tune-ident.txt`, `final/switch.log`, `final/serve.log` | server identity every 30 s, per tuning point, and at every switch |
+| `final/FREEZE-top100.json`, `final/server-top100.redacted.json` | the top_k 100 config, frozen on dev before its test run |
+| `final/s7/` | sha256 of every stage binary still on the server box |
 | `runs/*.yaml` | the exact storm configs (the bearer token is an env var) |
 | `runs/*.ts.jsonl.gz` | nova-storm per-request report rows: latency, ok, per-query recall |
 | `runs/*.server`, `runs/*.log` | server identity before and after each run; nova-storm logs |

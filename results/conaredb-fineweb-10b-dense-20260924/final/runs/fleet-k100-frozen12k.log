@@ -1,0 +1,6 @@
+[2m2026-09-24T11:00:54.817126Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m time-series report: Jsonl -> /home/azureuser/qdrant-10b/final/runs/fleet-k100-frozen12k.ts.jsonl
+[2m2026-09-24T11:00:54.817149Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m queries: Dense via vector `(unnamed)`
+[2m2026-09-24T11:00:54.817168Z[0m [32m INFO[0m [2mnova_storm::targets::conaredb[0m[2m:[0m conaredb expand: 2557787738 distinct rows, 10074324060 postings (disclosed expansion proxy, in the measured path)
+[2m2026-09-24T11:00:54.817225Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m score tie tolerance: 2.0e-3 (auto, datatype=float16)
+[2m2026-09-24T11:00:59.972756Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m storm: closed-loop concurrency=160 batch_size=1 [3mtarget[0m[2m=[0mconaredb(http://10.0.0.14:19305/v2/search, expand) [3mquery_vectors[0m[2m=[0m95000 [3mduration_s[0m[2m=[0m1200.0 [3mbatch_size[0m[2m=[0m1
+[2m2026-09-24T11:00:59.972807Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m recall tracking: 95000/95000 queries have ground truth (column Some("hit_fineweb_ids"))

@@ -1,24 +1,356 @@
 {
  "system": "ConareDB v2 (conaredb-server, conareai/conare main c136d6788, sha256 cd60f49ae1d2c70a1965415160a577aaff4eb64cfefcd0d19860d0d5ab6f7c89)",
  "dataset": "Qdrant/FineWeb-10B dense (gte-multilingual-base 768-d float16), 10,074,324,060 documents",
- "ground_truth": {"file": "queries/gt_dense_k1000.parquet", "hf_revision": "3aea0b8d5f98741e343d07f067ce0f49dca1ccd2", "sha256": "847989d235ecd8c7118b64709cfe5d54ff36b82ad8c70c9de31c5347633bbd81"},
- "queries": {"vectors": "regenerated with queries/scripts/regenerate_queries.py @420f4686, one full 100k run", "test_rows": [5000, 100000], "test_count": 95000, "dev_rows": [0, 5000]},
+ "ground_truth": {
+  "file": "queries/gt_dense_k1000.parquet",
+  "hf_revision": "3aea0b8d5f98741e343d07f067ce0f49dca1ccd2",
+  "sha256": "847989d235ecd8c7118b64709cfe5d54ff36b82ad8c70c9de31c5347633bbd81"
+ },
+ "queries": {
+  "vectors": "regenerated with queries/scripts/regenerate_queries.py @420f4686, one full 100k run",
+  "test_rows": [
+   5000,
+   100000
+  ],
+  "test_count": 95000,
+  "dev_rows": [
+   0,
+   5000
+  ]
+ },
  "top_k": 10,
- "recall_at_10": {"strict_lower_bound": 0.9729947, "tie_2e-3_rel_upper_bound": 0.9860779, "tie_5e-6_rel": 0.9755789, "tie_1e-5_abs": 0.9758558, "exact_search_ceiling_strict": 0.99878},
- "tie_epsilon_auto": {"value": 0.002, "source": "auto, float16"},
+ "recall_at_10": {
+  "strict_lower_bound": 0.9729947,
+  "tie_2e-3_rel_upper_bound": 0.9860779,
+  "tie_5e-6_rel": 0.9755789,
+  "tie_1e-5_abs": 0.9758558,
+  "exact_search_ceiling_strict": 0.99878
+ },
+ "tie_epsilon_auto": {
+  "value": 0.002,
+  "source": "auto, float16"
+ },
  "missing_from_gt": 0,
  "load": {
-  "closed_c32": {"qps": 595.18, "p50_ms": 53.18, "p95_ms": 64.11, "p99_ms": 69.84, "max_ms": 172.03, "errors": 0, "repeats": 3},
-  "open_200rps": {"qps": 199.99, "p50_ms": 25.31, "p95_ms": 31.38, "p99_ms": 35.31, "max_ms": 99.83, "errors": 0, "repeats": 3},
-  "open_400rps": {"qps": 399.94, "p50_ms": 34.07, "p95_ms": 42.35, "p99_ms": 46.62, "max_ms": 123.48, "errors": 0, "repeats": 3}
+  "closed_c1": {
+   "qps": 42.9,
+   "p50_ms": 22.58,
+   "p95_ms": 27.78,
+   "p99_ms": 49.91,
+   "max_ms": 74.64,
+   "errors": [
+    0,
+    0,
+    0
+   ],
+   "timeouts": [
+    0,
+    0,
+    0
+   ],
+   "repeats": 3,
+   "runs": [
+    "s6-c1-rep1",
+    "s6-c1-rep2",
+    "s6-c1-rep3"
+   ]
+  },
+  "closed_c16": {
+   "qps": 441.71,
+   "p50_ms": 36.01,
+   "p95_ms": 44.27,
+   "p99_ms": 48.53,
+   "max_ms": 124.47,
+   "errors": [
+    0,
+    0,
+    0
+   ],
+   "timeouts": [
+    0,
+    0,
+    0
+   ],
+   "repeats": 3,
+   "runs": [
+    "s6-c16-rep1",
+    "s6-c16-rep2",
+    "s6-c16-rep3"
+   ]
+  },
+  "closed_c32": {
+   "qps": 595.18,
+   "p50_ms": 53.18,
+   "p95_ms": 64.11,
+   "p99_ms": 69.84,
+   "max_ms": 172.03,
+   "errors": 0,
+   "repeats": 3
+  },
+  "closed_c64": {
+   "qps": 614.06,
+   "p50_ms": 102.17,
+   "p95_ms": 147.39,
+   "p99_ms": 168.6,
+   "max_ms": 267.2,
+   "errors": [
+    0,
+    0,
+    0
+   ],
+   "timeouts": [
+    0,
+    0,
+    0
+   ],
+   "repeats": 3,
+   "runs": [
+    "s6-c64-rep1",
+    "s6-c64-rep2",
+    "s6-c64-rep3"
+   ]
+  },
+  "closed_c256": {
+   "qps": 623.5,
+   "p50_ms": 407.83,
+   "p95_ms": 496.47,
+   "p99_ms": 539.65,
+   "max_ms": 698.57,
+   "errors": [
+    0,
+    2,
+    0
+   ],
+   "timeouts": [
+    0,
+    0,
+    0
+   ],
+   "repeats": 3,
+   "runs": [
+    "s6-c256-rep1",
+    "s6-c256-rep2",
+    "s6-c256-rep3"
+   ],
+   "error_text_first": "search HTTP 429 Too Many Requests: queue_full (rep2, both errors at t=9 ms)"
+  },
+  "open_100rps": {
+   "qps": 100.0,
+   "p50_ms": 22.24,
+   "p95_ms": 29.01,
+   "p99_ms": 40.33,
+   "max_ms": 93.73,
+   "errors": [
+    0,
+    0,
+    0
+   ],
+   "timeouts": [
+    0,
+    0,
+    0
+   ],
+   "repeats": 3,
+   "runs": [
+    "s6-r100-rep1",
+    "s6-r100-rep2",
+    "s6-r100-rep3"
+   ],
+   "schedule_lag_s": 0.0,
+   "above_capacity": [
+    false,
+    false,
+    false
+   ]
+  },
+  "open_200rps": {
+   "qps": 199.99,
+   "p50_ms": 25.31,
+   "p95_ms": 31.38,
+   "p99_ms": 35.31,
+   "max_ms": 99.83,
+   "errors": 0,
+   "repeats": 3
+  },
+  "open_400rps": {
+   "qps": 399.94,
+   "p50_ms": 34.07,
+   "p95_ms": 42.35,
+   "p99_ms": 46.62,
+   "max_ms": 123.48,
+   "errors": 0,
+   "repeats": 3
+  },
+  "open_600rps": {
+   "qps": 599.85,
+   "p50_ms": 52.27,
+   "p95_ms": 100.34,
+   "p99_ms": 151.35,
+   "max_ms": 286.83,
+   "errors": [
+    0,
+    0,
+    0
+   ],
+   "timeouts": [
+    0,
+    0,
+    0
+   ],
+   "repeats": 3,
+   "runs": [
+    "s6-r600-rep1",
+    "s6-r600-rep2",
+    "s6-r600-rep3"
+   ],
+   "schedule_lag_s": 0.0,
+   "above_capacity": [
+    false,
+    false,
+    false
+   ]
+  },
+  "open_800rps": {
+   "qps": 624.17,
+   "p50_ms": 405.82,
+   "p95_ms": 493.36,
+   "p99_ms": 546.11,
+   "max_ms": 710.62,
+   "errors": [
+    0,
+    0,
+    0
+   ],
+   "timeouts": [
+    0,
+    0,
+    0
+   ],
+   "repeats": 3,
+   "runs": [
+    "s6-r800-rep1",
+    "s6-r800-rep2",
+    "s6-r800-rep3r"
+   ],
+   "schedule_lag_s": 33.5,
+   "above_capacity": [
+    true,
+    true,
+    true
+   ],
+   "note": "above capacity: achieved QPS is the measured ceiling; latency excludes the wait for one of nova-storm's 256 in-flight slots"
+  }
  },
  "aggregation": "median of 3 repeats, each metric separately",
  "hardware": {
-  "server": {"sku": "Azure Standard_L96as_v4", "vcpu": 96, "cpu": "AMD EPYC 9V74", "ram_gib": 755, "storage": "12 x 1.7 TB local NVMe RAID0", "region": "eastus2", "usd_per_hour_billed": 8.256, "count": 1},
-  "client": {"sku": "Azure Standard_L32aos_v4", "vcpu": 32, "usd_per_hour_billed": 3.616, "count": 1, "network": "same VNet, private IPs"}
+  "server": {
+   "sku": "Azure Standard_L96as_v4",
+   "vcpu": 96,
+   "cpu": "AMD EPYC 9V74",
+   "ram_gib": 755,
+   "storage": "12 x 1.7 TB local NVMe RAID0",
+   "region": "eastus2",
+   "usd_per_hour_billed": 8.256,
+   "count": 1
+  },
+  "client": {
+   "sku": "Azure Standard_L32aos_v4",
+   "vcpu": 32,
+   "usd_per_hour_billed": 3.616,
+   "count": 1,
+   "network": "same VNet, private IPs"
+  }
  },
- "usd_per_1m_queries_server_only": {"c32_595qps": 3.85, "400qps": 5.73, "200qps": 11.47},
- "index": {"distinct_vectors": 2557787738, "spill_rows": 767336321, "duplicate_fraction_of_rows": 0.746, "id_serving": "distinct-row ids expanded to FineWeb uuids in the nova-storm client (CSR, inside measured latency), copies in ascending uuid"},
- "client_tool": {"nova_storm": "conareai/supernova 7d7d0d3 (upstream b8e5b07 + conaredb target)", "sha256": "a54501436c38fe797f466736bfc5ce47d895ee0000645482ee218b2e935615b9"},
- "frozen_before_test": {"freeze_push_utc": "2026-09-24T01:06:09Z", "first_test_query_utc": "2026-09-24T01:07:14Z", "server_json_sha256": "4beb073110d3ce3478ac8430a8e7bc8eead3e2bef41d94888eeb842677b4a548"}
+ "usd_per_1m_queries_server_only": {
+  "c32_595qps": 3.85,
+  "400qps": 5.73,
+  "200qps": 11.47
+ },
+ "index": {
+  "distinct_vectors": 2557787738,
+  "spill_rows": 767336321,
+  "duplicate_fraction_of_rows": 0.746,
+  "id_serving": "distinct-row ids expanded to FineWeb uuids in the nova-storm client (CSR, inside measured latency), copies in ascending uuid",
+  "build_binaries": {
+   "build": "conaredb-bench 04bc106a (conare main 411e597b3)",
+   "spill": "conaredb-bench e1a563ec (main 004bf571b)",
+   "import": "conaredb-import e018eb15 (main 004bf571b)",
+   "dedupe": "dedupe 333bc916 (C, not in git)",
+   "hf_download_to_prep": "never timed, not re-run"
+  }
+ },
+ "client_tool": {
+  "nova_storm": "conareai/supernova 7d7d0d3 (upstream b8e5b07 + conaredb target)",
+  "sha256": "a54501436c38fe797f466736bfc5ce47d895ee0000645482ee218b2e935615b9"
+ },
+ "frozen_before_test": {
+  "freeze_push_utc": "2026-09-24T01:06:09Z",
+  "first_test_query_utc": "2026-09-24T01:07:14Z",
+  "server_json_sha256": "4beb073110d3ce3478ac8430a8e7bc8eead3e2bef41d94888eeb842677b4a548"
+ },
+ "capacity_qps_top_k_10": 624.17,
+ "void_runs": {
+  "s6-r800-rep3": "identity window: at 10:35:32Z, 38 s after the run ended, the on-disk server.json was already rewritten for the first top_k 100 dev point (the serving pid was still the frozen 291953); the 60 s rule voids the run -> rerun s6-r800-rep3r"
+ },
+ "expansion_cost_ab": {
+  "c32_pair1": {
+   "p50_ms": 0.018,
+   "p95_ms": 0.12,
+   "p99_ms": 0.383,
+   "max_ms": 20.889,
+   "qps": -1.133
+  },
+  "c32_pair2": {
+   "p50_ms": -0.202,
+   "p95_ms": -0.215,
+   "p99_ms": -0.474,
+   "max_ms": 17.563,
+   "qps": 2.729
+  },
+  "r200": {
+   "p50_ms": 0.425,
+   "p95_ms": 0.309,
+   "p99_ms": 0.545,
+   "max_ms": 2.556,
+   "qps": 0.0
+  },
+  "c32_mean_dp50_ms": -0.092,
+  "c32_mean_dp99_ms": -0.045,
+  "material_rule": "mean c32 dp50 > 1.0 ms or mean c32 dp99 > 2.0 ms or r200 dp50 > 1.0 ms (RULES.md step 2)",
+  "material": false,
+  "sign": "delta = expand on - expand off"
+ },
+ "qdrant_fleet_shape_top_k_100": {
+  "shape": "Qdrant fineweb-10b branch 6a0bc58 configs/storm/fineweb_bf_k1000_fleet.yaml: top_k 100, 10 x c16 (run here as one process at c160), duration_s 1200, file cycled; test queries only",
+  "frozen_12k": {
+   "config": "frozen headline config: 12,000 leaves, rescore 400, server.json 4beb0731",
+   "requests": 753902,
+   "errors": 0,
+   "timeouts": 0,
+   "qps": 628.15,
+   "recall_at_100_strict": 0.95836,
+   "recall_at_100_tie_2e-3": 0.98378,
+   "p50_ms": 251.88,
+   "p95_ms": 321.77,
+   "p99_ms": 359.87,
+   "max_ms": 570.93,
+   "missing_from_gt": 0,
+   "run": "fleet-k100-frozen12k"
+  },
+  "tuned_top100": {
+   "config": "tuned on dev only: 18,000 leaves, rescore 1000, server.json 02e65587 (final/FREEZE-top100.json, pushed 10:56:34Z; first test query 11:24:06Z)",
+   "requests": 476554,
+   "errors": 0,
+   "timeouts": 0,
+   "qps": 397.03,
+   "recall_at_100_strict": 0.96892,
+   "recall_at_100_tie_2e-3": 0.98859,
+   "p50_ms": 399.35,
+   "p95_ms": 553.48,
+   "p99_ms": 617.92,
+   "max_ms": 893.25,
+   "missing_from_gt": 0,
+   "run": "fleet-k100-tuned"
+  }
+ }
 }

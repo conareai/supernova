@@ -1,0 +1,22 @@
+# s3-c32-off-2: set=test mode=c32 expand=off top_k=10 duration_s=0; client s5 (Standard_L32aos_v4, 10.0.0.10) -> A (Standard_L96as_v4, 10.0.0.14) over the vnet
+target:
+  type: conaredb
+  url: http://10.0.0.14:19305
+  api_key: ${CONAREDB_AUTH_TOKEN}
+  timeout_s: 30
+  # expand: OFF (S3 A/B). Hit ids stay distinct-row ordinals, so this run's recall is meaningless; latency only.
+query:
+  top_k: 10
+  source:
+    uri: /home/azureuser/qdrant-10b/queries-20260924/storm-test.parquet
+    column: dense_embedding
+    limit: 100000
+    ground_truth_column: hit_fineweb_ids
+    ground_truth_score_column: hit_scores
+load:
+  concurrency: 32
+  rps: 0
+  passes: 1
+report:
+  format: jsonl
+  path: /home/azureuser/qdrant-10b/final/runs/s3-c32-off-2.ts.jsonl

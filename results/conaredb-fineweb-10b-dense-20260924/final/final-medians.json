@@ -1,0 +1,218 @@
+{
+ "s6-c1": {
+  "runs": [
+   "s6-c1-rep1",
+   "s6-c1-rep2",
+   "s6-c1-rep3"
+  ],
+  "all_ident_ok": true,
+  "errors": [
+   0,
+   0,
+   0
+  ],
+  "timeouts": [
+   0,
+   0,
+   0
+  ],
+  "strict": 0.9729947368420923,
+  "tie": 0.9860778947368404,
+  "qps": 42.90262529104,
+  "p50": 22.578152,
+  "p95": 27.779778,
+  "p99": 49.91442,
+  "max": 74.64285,
+  "above_capacity": [
+   null,
+   null,
+   null
+  ]
+ },
+ "s6-c16": {
+  "runs": [
+   "s6-c16-rep1",
+   "s6-c16-rep2",
+   "s6-c16-rep3"
+  ],
+  "all_ident_ok": true,
+  "errors": [
+   0,
+   0,
+   0
+  ],
+  "timeouts": [
+   0,
+   0,
+   0
+  ],
+  "strict": 0.9729947368420923,
+  "tie": 0.9860778947368404,
+  "qps": 441.71363203078647,
+  "p50": 36.010949000000004,
+  "p95": 44.270887,
+  "p99": 48.530141,
+  "max": 124.466438,
+  "above_capacity": [
+   null,
+   null,
+   null
+  ]
+ },
+ "s6-c64": {
+  "runs": [
+   "s6-c64-rep1",
+   "s6-c64-rep2",
+   "s6-c64-rep3"
+  ],
+  "all_ident_ok": true,
+  "errors": [
+   0,
+   0,
+   0
+  ],
+  "timeouts": [
+   0,
+   0,
+   0
+  ],
+  "strict": 0.9729947368420923,
+  "tie": 0.9860778947368404,
+  "qps": 614.0617849075992,
+  "p50": 102.17054300000001,
+  "p95": 147.393529,
+  "p99": 168.599102,
+  "max": 267.203013,
+  "above_capacity": [
+   null,
+   null,
+   null
+  ]
+ },
+ "s6-c256": {
+  "runs": [
+   "s6-c256-rep1",
+   "s6-c256-rep2",
+   "s6-c256-rep3"
+  ],
+  "all_ident_ok": true,
+  "errors": [
+   0,
+   2,
+   0
+  ],
+  "timeouts": [
+   0,
+   0,
+   0
+  ],
+  "strict": 0.9729947368420923,
+  "tie": 0.9860778947368402,
+  "qps": 623.5045248565559,
+  "p50": 407.826033,
+  "p95": 496.471784,
+  "p99": 539.6526,
+  "max": 698.567033,
+  "above_capacity": [
+   null,
+   null,
+   null
+  ]
+ },
+ "s6-r100": {
+  "runs": [
+   "s6-r100-rep1",
+   "s6-r100-rep2",
+   "s6-r100-rep3"
+  ],
+  "all_ident_ok": true,
+  "errors": [
+   0,
+   0,
+   0
+  ],
+  "timeouts": [
+   0,
+   0,
+   0
+  ],
+  "strict": 0.9729947368420923,
+  "tie": 0.9860778947368404,
+  "qps": 99.99793543936183,
+  "p50": 22.241602,
+  "p95": 29.005330999999998,
+  "p99": 40.326317,
+  "max": 93.72851,
+  "schedule_lag_s": 0.0,
+  "above_capacity": [
+   false,
+   false,
+   false
+  ]
+ },
+ "s6-r600": {
+  "runs": [
+   "s6-r600-rep1",
+   "s6-r600-rep2",
+   "s6-r600-rep3"
+  ],
+  "all_ident_ok": true,
+  "errors": [
+   0,
+   0,
+   0
+  ],
+  "timeouts": [
+   0,
+   0,
+   0
+  ],
+  "strict": 0.9729947368420923,
+  "tie": 0.9860778947368405,
+  "qps": 599.8548958041138,
+  "p50": 52.268477,
+  "p95": 100.338251,
+  "p99": 151.35353700000002,
+  "max": 286.834767,
+  "schedule_lag_s": 0.0,
+  "above_capacity": [
+   false,
+   false,
+   false
+  ]
+ },
+ "s6-r800": {
+  "runs": [
+   "s6-r800-rep1",
+   "s6-r800-rep2",
+   "s6-r800-rep3r"
+  ],
+  "all_ident_ok": true,
+  "errors": [
+   0,
+   0,
+   0
+  ],
+  "timeouts": [
+   0,
+   0,
+   0
+  ],
+  "strict": 0.9729947368420923,
+  "tie": 0.9860778947368404,
+  "qps": 624.1659183244884,
+  "p50": 405.820894,
+  "p95": 493.357607,
+  "p99": 546.1058840000001,
+  "max": 710.618871,
+  "schedule_lag_s": 33.5,
+  "above_capacity": [
+   true,
+   true,
+   true
+  ]
+ },
+ "_void": {
+  "s6-r800-rep3": "identity window: at 10:35:32Z, 38 s after the run ended, the on-disk server.json was already rewritten for the first top_k 100 dev point (the serving pid was still the frozen 291953); the 60 s rule voids the run -> rerun s6-r800-rep3r"
+ }
+}

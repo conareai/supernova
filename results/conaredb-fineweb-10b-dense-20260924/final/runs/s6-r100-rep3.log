@@ -1,0 +1,7 @@
+[2m2026-09-24T10:13:29.021623Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m time-series report: Jsonl -> /home/azureuser/qdrant-10b/final/runs/s6-r100-rep3.ts.jsonl
+[2m2026-09-24T10:13:29.021646Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m queries: Dense via vector `(unnamed)`
+[2m2026-09-24T10:13:29.021665Z[0m [32m INFO[0m [2mnova_storm::targets::conaredb[0m[2m:[0m conaredb expand: 2557787738 distinct rows, 10074324060 postings (disclosed expansion proxy, in the measured path)
+[2m2026-09-24T10:13:29.021719Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m score tie tolerance: 2.0e-3 (auto, datatype=float16)
+[2m2026-09-24T10:13:33.968366Z[0m [32m INFO[0m [2mnova_storm::queries[0m[2m:[0m ground truth truncated to top_k=10 for 95000 queries (deepest list held 100 ids) — recall is measured against the true top-10, NOT against every id in the list
+[2m2026-09-24T10:13:34.014733Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m storm: paced 100 rps/worker (batch_size=1, cap 256 in-flight) [3mtarget[0m[2m=[0mconaredb(http://10.0.0.14:19305/v2/search, expand) [3mquery_vectors[0m[2m=[0m95000 [3mduration_s[0m[2m=[0m60.0 [3mbatch_size[0m[2m=[0m1
+[2m2026-09-24T10:13:34.014815Z[0m [32m INFO[0m [2mnova_storm[0m[2m:[0m recall tracking: 95000/95000 queries have ground truth (column Some("hit_fineweb_ids"))

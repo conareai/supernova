@@ -1,0 +1,28 @@
+{
+ "c32_pair1": {
+  "p50_ms": 0.018,
+  "p95_ms": 0.12,
+  "p99_ms": 0.383,
+  "max_ms": 20.889,
+  "qps": -1.133
+ },
+ "c32_pair2": {
+  "p50_ms": -0.202,
+  "p95_ms": -0.215,
+  "p99_ms": -0.474,
+  "max_ms": 17.563,
+  "qps": 2.729
+ },
+ "r200": {
+  "p50_ms": 0.425,
+  "p95_ms": 0.309,
+  "p99_ms": 0.545,
+  "max_ms": 2.556,
+  "qps": 0.0
+ },
+ "c32_mean_dp50_ms": -0.092,
+ "c32_mean_dp99_ms": -0.045,
+ "material_rule": "mean c32 dp50 > 1.0 ms or mean c32 dp99 > 2.0 ms or r200 dp50 > 1.0 ms (RULES.md step 2)",
+ "material": false,
+ "sign": "delta = expand on - expand off"
+}
