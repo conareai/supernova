@@ -1,0 +1,28 @@
+{
+ "rule": "dev = every row we embedded before 2026-09-24 (s4 fw-1b-s4 queries.npy = rows 0-4999); tuned_on = rows 2000-2999 (queries-q2000.json, cycled in the 2026-09-23 reads); test = rows 5000-99999",
+ "dev": [
+  0,
+  5000
+ ],
+ "tuned_on": [
+  2000,
+  3000
+ ],
+ "test": [
+  5000,
+  100000
+ ],
+ "rows": 100000,
+ "gt_revision": "3aea0b8d5f98741e343d07f067ce0f49dca1ccd2",
+ "gt_sha256": "847989d235ecd8c7118b64709cfe5d54ff36b82ad8c70c9de31c5347633bbd81",
+ "gt_depth_kept": 100,
+ "script_revision": "420f4686",
+ "script_sha256": {
+  "regenerate_queries.py": "7bdd686a7b8f9df4d5bf6ae5ad89516f85b6c31086f3e4e77d4bcfdc91cbd8f1",
+  "verify_regeneration.py": "5dfbac63899f476787e56e37655cae1fec3908456bd13d1bf536c597e9efcd9f"
+ },
+ "model_revision": "9bbca17d9273fd0d03d5725c7a4b0f6b45142062",
+ "impl_revision": "40ced75c3017eb27626c9d4ea981bde21a2662f4",
+ "norm_min": 0.999999836397704,
+ "norm_max": 1.000000193850763
+}

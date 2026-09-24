@@ -1,0 +1,84 @@
+{
+ "listen": "10.0.0.14:19305",
+ "root": "/mnt/nvme/gserve2/doc",
+ "engine": {
+  "identity": [
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7,
+   7
+  ],
+  "vector_dimensions": 768,
+  "max_transaction_bytes": 4194304,
+  "max_mutations": 1024,
+  "max_buffer_bytes": 33554432,
+  "max_buffer_entries": 100000,
+  "max_buffer_batches": 64,
+  "max_pinned_views": 256,
+  "max_table_index_bytes": 268435456,
+  "compaction_fanout": 4,
+  "max_unindexed_bytes": 134217728,
+  "max_unindexed_rows": 100000,
+  "max_unindexed_batches": 4096
+ },
+ "limits": {
+  "workers": 96,
+  "read_queue": 192,
+  "write_queue": 8,
+  "max_body_bytes": 4194304,
+  "max_response_bytes": 8388608,
+  "max_top_k": 100,
+  "max_get_ids": 100,
+  "max_connections": 512,
+  "header_timeout_ms": 5000,
+  "body_timeout_ms": 5000,
+  "request_timeout_ms": 30000,
+  "connection_lifetime_ms": 3600000,
+  "scan_threads": 4,
+  "route_threads": 4
+ },
+ "budget": {
+  "exact_centroids": 15000,
+  "leaves": 12000,
+  "max_inflight": 96,
+  "prefix_margin": 2.0,
+  "rescore": 400,
+  "routing_candidates": 384000
+ },
+ "bearer_token": "<redacted>",
+ "index_policy": {
+  "build": {
+   "dimensions": 768,
+   "fanout": 100,
+   "target_leaf_rows": 160,
+   "max_leaf_rows": 256,
+   "sample_per_child": 64,
+   "lloyd_iterations": 12,
+   "seed": 4850181366161430066,
+   "workers": 96,
+   "pack_bytes": 67108864
+  },
+  "chunk_rows": 32768,
+  "implementation": "main-004bf571b-global-dedupe-b512",
+  "binary_sha256": "b016a0ac31e3c4448cf40cf4909e6aa5f4961e8e050024041d5cbda3840f6219",
+  "selective_spill": {
+   "fraction": 0.3,
+   "lambda": 1.5,
+   "routing_evaluation_budget": 512,
+   "memory_budget_bytes": 343597383680
+  }
+ },
+ "file_handle_limit": 1048576
+}

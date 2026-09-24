@@ -1,0 +1,24 @@
+{
+ "system": "ConareDB v2 (conaredb-server, conareai/conare main c136d6788, sha256 cd60f49ae1d2c70a1965415160a577aaff4eb64cfefcd0d19860d0d5ab6f7c89)",
+ "dataset": "Qdrant/FineWeb-10B dense (gte-multilingual-base 768-d float16), 10,074,324,060 documents",
+ "ground_truth": {"file": "queries/gt_dense_k1000.parquet", "hf_revision": "3aea0b8d5f98741e343d07f067ce0f49dca1ccd2", "sha256": "847989d235ecd8c7118b64709cfe5d54ff36b82ad8c70c9de31c5347633bbd81"},
+ "queries": {"vectors": "regenerated with queries/scripts/regenerate_queries.py @420f4686, one full 100k run", "test_rows": [5000, 100000], "test_count": 95000, "dev_rows": [0, 5000]},
+ "top_k": 10,
+ "recall_at_10": {"strict_lower_bound": 0.9729947, "tie_2e-3_rel_upper_bound": 0.9860779, "tie_5e-6_rel": 0.9755789, "tie_1e-5_abs": 0.9758558, "exact_search_ceiling_strict": 0.99878},
+ "tie_epsilon_auto": {"value": 0.002, "source": "auto, float16"},
+ "missing_from_gt": 0,
+ "load": {
+  "closed_c32": {"qps": 595.18, "p50_ms": 53.18, "p95_ms": 64.11, "p99_ms": 69.84, "max_ms": 172.03, "errors": 0, "repeats": 3},
+  "open_200rps": {"qps": 199.99, "p50_ms": 25.31, "p95_ms": 31.38, "p99_ms": 35.31, "max_ms": 99.83, "errors": 0, "repeats": 3},
+  "open_400rps": {"qps": 399.94, "p50_ms": 34.07, "p95_ms": 42.35, "p99_ms": 46.62, "max_ms": 123.48, "errors": 0, "repeats": 3}
+ },
+ "aggregation": "median of 3 repeats, each metric separately",
+ "hardware": {
+  "server": {"sku": "Azure Standard_L96as_v4", "vcpu": 96, "cpu": "AMD EPYC 9V74", "ram_gib": 755, "storage": "12 x 1.7 TB local NVMe RAID0", "region": "eastus2", "usd_per_hour_billed": 8.256, "count": 1},
+  "client": {"sku": "Azure Standard_L32aos_v4", "vcpu": 32, "usd_per_hour_billed": 3.616, "count": 1, "network": "same VNet, private IPs"}
+ },
+ "usd_per_1m_queries_server_only": {"c32_595qps": 3.85, "400qps": 5.73, "200qps": 11.47},
+ "index": {"distinct_vectors": 2557787738, "spill_rows": 767336321, "duplicate_fraction_of_rows": 0.746, "id_serving": "distinct-row ids expanded to FineWeb uuids in the nova-storm client (CSR, inside measured latency), copies in ascending uuid"},
+ "client_tool": {"nova_storm": "conareai/supernova 7d7d0d3 (upstream b8e5b07 + conaredb target)", "sha256": "a54501436c38fe797f466736bfc5ce47d895ee0000645482ee218b2e935615b9"},
+ "frozen_before_test": {"freeze_push_utc": "2026-09-24T01:06:09Z", "first_test_query_utc": "2026-09-24T01:07:14Z", "server_json_sha256": "4beb073110d3ce3478ac8430a8e7bc8eead3e2bef41d94888eeb842677b4a548"}
+}

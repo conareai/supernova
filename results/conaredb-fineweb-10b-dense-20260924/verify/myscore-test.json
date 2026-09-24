@@ -1,0 +1,31 @@
+{
+ "queries": 95000,
+ "strict": 0.9729947368421052,
+ "tie_2e-3": 0.9860778947368422,
+ "tie_5e-6": 0.9755789473684211,
+ "tie_abs_1e-5": 0.9758557894736842,
+ "strict_tenths_sum": 924345,
+ "tie_2e-3_tenths_sum": 936774,
+ "strict_hist_tenths": {
+  "0": 467,
+  "1": 256,
+  "2": 273,
+  "3": 331,
+  "4": 447,
+  "5": 495,
+  "6": 635,
+  "7": 731,
+  "8": 1109,
+  "9": 2072,
+  "10": 88184
+ },
+ "short_returns": 0,
+ "missing_above_cutoff_2e-3": 0,
+ "multi_copy_rows_expanded": 191364,
+ "served_rows_sha256": {
+  "test-frozen-5000.served_rows.npy": "e86833e9ce7af17b1595065d19caa2468f2524ecf655111a401cf7197b410daa",
+  "test-frozen-36667.served_rows.npy": "e0d899a081b401ddc7427a8d170590a4b0facb03be2c8e0587176de9231619d4",
+  "test-frozen-68334.served_rows.npy": "32b55144fd2eb016111b6597ec2ac51197de60d6f376c0b322be8bb205d3cbc8"
+ },
+ "gt": "/mnt/nvme/qdrant-10b/gt/gt_dense_k1000.parquet (HF 3aea0b8d)"
+}

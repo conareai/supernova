@@ -1,0 +1,5 @@
+pre pid=269947 start=Thu_Sep_24_01:04:58_2026 exe=cd60f49ae1d2c70a1965415160a577aaff4eb64cfefcd0d19860d0d5ab6f7c89 exe_path=/home/azureuser/bin9/conaredb-server cfg=/mnt/nvme/gserve2/serve/server.json cfg_sha=4beb073110d3ce3478ac8430a8e7bc8eead3e2bef41d94888eeb842677b4a548 leaves=12000 exact_centroids=15000 routing_candidates=384000 rescore=400 prefix_margin=2.0 max_inflight=96 workers=96 scan=4 route=4 read_queue=192 max_connections=512 env=
+A loadavg pre: 0.08 0.02 0.01 1/1551 276066
+note: resumed at 05:2xZ after a 3.6 h idle gap (previous agent killed); A idle, buff/cache 744 GiB held
+post pid=269947 start=Thu_Sep_24_01:04:58_2026 exe=cd60f49ae1d2c70a1965415160a577aaff4eb64cfefcd0d19860d0d5ab6f7c89 exe_path=/home/azureuser/bin9/conaredb-server cfg=/mnt/nvme/gserve2/serve/server.json cfg_sha=4beb073110d3ce3478ac8430a8e7bc8eead3e2bef41d94888eeb842677b4a548 leaves=12000 exact_centroids=15000 routing_candidates=384000 rescore=400 prefix_margin=2.0 max_inflight=96 workers=96 scan=4 route=4 read_queue=192 max_connections=512 env=
+A loadavg post: 26.71 20.57 8.97 1/1563 276562

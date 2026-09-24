@@ -1,0 +1,18 @@
+{
+ "frozen_at": "2026-09-24T01:06Z, before any test query (test = q5000-99999)",
+ "rule": "RULES.md (committed d5b0ff28d): lowest dev c32 p99 among dev points with strict recall@10 >= 0.97 and 0 errors at c32, r200, r400",
+ "result_of_rule": "leaves 12000, scan_threads 4, route_threads 4 (dev strict 0.9752, c32 p99 82.2 ms; 12k 8+8 93.3, 12k 2+2 101.4, 18k 4+4 106.6; 9k 0.9695 < 0.97)",
+ "server_binary": {"path_on_A": "/home/azureuser/bin9/conaredb-server (copy of /mnt/nvme/qdrant-10b/s156/conaredb-server-main-c136d6788)",
+                   "sha256": "cd60f49ae1d2c70a1965415160a577aaff4eb64cfefcd0d19860d0d5ab6f7c89",
+                   "source": "conareai/conare main c136d67883943dd7877ecfb3f53a98334bc4dceb, git archive crates/conaredb-v2, cargo build --release -p conaredb-server (rustc 1.98.1, workspace release profile: lto thin, codegen-units 1, no target-cpu), build box conaredb-build-20260919b"},
+ "server_json_sha256": "4beb073110d3ce3478ac8430a8e7bc8eead3e2bef41d94888eeb842677b4a548",
+ "server_json_redacted": "freeze/server.redacted.json (bearer token redacted)",
+ "budget": {"leaves": 12000, "exact_centroids": 15000, "routing_candidates": 384000, "rescore": 400, "prefix_margin": 2.0, "max_inflight": 96},
+ "limits": {"workers": 96, "scan_threads": 4, "route_threads": 4, "read_queue": 192, "max_connections": 512, "max_pinned_views": 256},
+ "index": {"path": "/mnt/nvme/gidx/idx-spill30-b512", "manifest_sha256": "c45e971d0464eada1114d2257a5bfefcb2974d726ba9e41daab5780d5a3768d6",
+           "rows": 2557787738, "ids": "rows (hit id = distinct row + 1)", "import_generation": "5ccb3d6109dfe2cda5049ca94edd4ed10b0cae9403006a5c8e7f0c3ea94fb0da"},
+ "client": {"box": "conaredb-fw1b-s5 Standard_L32aos_v4 10.0.0.10", "nova_storm_sha256": "a54501436c38fe797f466736bfc5ce47d895ee0000645482ee218b2e935615b9",
+            "nova_storm_source": "conareai/supernova 7d7d0d3 (merged as master ce6690ee)", "expand": "S0 CSR on s5 NVMe, csr-offsets.u64 sha 15a90a4e..., csr-uuids.bin sha 0c2fd866... (== S0)", "copy_order": "uuid"},
+ "result_cache": "none: the v2 server has no memo/result cache (no memo symbol in the binary; the v1 memo does not exist in v2)",
+ "binary_ab_on_dev": "9k 8+8: main cd60f49a vs running 917245aa (engine/v2-per-worker-pools build): strict 0.9695 = 0.9695, c32 p99 72.2 vs 73.4, r400 p99 20.5 vs 21.2 -> main build used (provenance: a pushed main commit)"
+}

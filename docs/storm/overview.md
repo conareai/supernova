@@ -2,7 +2,7 @@
 
 `nova storm` sends sustained query load to a vector store and reports latency and throughput. With ground truth from `nova bf`, it also reports recall and rank agreement (RBO).
 
-Qdrant is built in; Elasticsearch, OpenSearch, and Milvus are optional.
+Qdrant is built in; Elasticsearch, OpenSearch, Milvus, and ConareDB are optional.
 
 ## Config
 
@@ -59,6 +59,7 @@ Environment variables support `${VAR}` and `${VAR:-default}` expansion.
 | `opensearch` | `ef_search`, `nprobes`, `rescore` |
 | `elastic` | `num_candidates` |
 | `milvus` | `ef` or `nprobe` |
+| `conaredb` | none: the server owns every ANN budget, so `search_params` is rejected |
 
 ## Filters
 
@@ -75,13 +76,17 @@ filter:
 
 ## Targets
 
-Supported targets are `qdrant`, `opensearch`, `elastic`, and `milvus`.
+Supported targets are `qdrant`, `opensearch`, `elastic`, `milvus`, and `conaredb`.
 
 Build optional backends with:
 
 ```bash
-make storm STORM_FEATURES=elastic,opensearch,milvus
+make storm STORM_FEATURES=elastic,opensearch,milvus,conaredb
 ```
+
+`conaredb` sends `POST /v2/search {vector, top_k}` to a ConareDB v2 server. For a corpus served with exact duplicates
+collapsed, its optional `expand` block maps returned distinct rows back to corpus ids from a CSR table on the client,
+inside the measured latency; see `crates/nova-storm/src/targets/conaredb.rs` and `configs/storm/example.yaml`.
 
 ## Running
 
